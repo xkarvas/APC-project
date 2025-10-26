@@ -8,5 +8,6 @@ int main(int argc, char* argv[]) {
 
     std::cout << "MiniDrive server stub (version " << minidrive::version() << ")" << std::endl;
     std::cout << "Command-line parsing and server startup are not yet implemented." << std::endl;
+    std::cout << "Exiting server." << std::endl;
     return 0;
 }
