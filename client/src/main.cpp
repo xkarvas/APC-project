@@ -1,170 +1,251 @@
+#define ASIO_STANDALONE
+#include <asio.hpp>
+#include <nlohmann/json.hpp>
+
 #include <iostream>
 #include <string>
-#include "minidrive/version.hpp"
-#include "minidrive/commands.hpp"
-#include "connection.hpp"
+#include <vector>
+#include <sstream>
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
 
-using minidrive::ParsedCommand;
-using minidrive::CommandType;
+using asio::ip::tcp;
 
-static std::unique_ptr<minidrive::Connection> g_conn;
-
-
-namespace {
-
-// Pomocná funkcia pre jednotný výpis chýb
-void print_usage_error(const std::string& cmd, const std::string& usage) {
-  std::cout << "❌  Invalid usage of '" << cmd << "'. Correct syntax:\n"
-            << "    " << usage << "\n";
+// --- big-endian helpers ---
+static inline void write_u32_be(uint32_t v, unsigned char out[4]) {
+    out[0] = (v >> 24) & 0xFF;
+    out[1] = (v >> 16) & 0xFF;
+    out[2] = (v >> 8)  & 0xFF;
+    out[3] = v & 0xFF;
+}
+static inline uint32_t read_u32_be(const unsigned char in[4]) {
+    return (uint32_t(in[0]) << 24) | (uint32_t(in[1]) << 16) | (uint32_t(in[2]) << 8) | uint32_t(in[3]);
 }
 
-
-void ensure_connection() {
-  if (!g_conn) {
-    g_conn = std::make_unique<minidrive::Connection>();
-    // host/port napevno; neskôr z argv
-    g_conn->connect("127.0.0.1", "5050");
-  }
+// --- blocking I/O ---
+static void send_json(tcp::socket& s, const nlohmann::json& j) {
+    const std::string payload = j.dump();
+    unsigned char hdr[4];
+    write_u32_be(static_cast<uint32_t>(payload.size()), hdr);
+    asio::write(s, asio::buffer(hdr, 4));
+    asio::write(s, asio::buffer(payload.data(), payload.size()));
+    std::cout << "[client] -> " << payload << "\n";
+}
+static bool recv_json(tcp::socket& s, nlohmann::json& out) {
+    unsigned char hdr[4];
+    asio::error_code ec;
+    size_t n = asio::read(s, asio::buffer(hdr, 4), ec);
+    if (ec || n != 4) return false;
+    uint32_t len = read_u32_be(hdr);
+    std::string payload(len, '\0');
+    asio::read(s, asio::buffer(payload.data(), len), ec);
+    if (ec) return false;
+    std::cout << "[client] <- " << payload << "\n";
+    out = nlohmann::json::parse(payload);
+    return true;
 }
 
+// --- pomocné: rozdelenie slov, trim, basename ---
+static void split_words(const std::string& line, std::vector<std::string>& out) {
+    std::istringstream iss(line);
+    std::string tok;
+    while (iss >> tok) out.push_back(tok);
+}
+static std::string to_upper(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c){ return std::toupper(c); });
+    return s;
+}
+static std::string basename_of(const std::string& p) {
+    auto pos = p.find_last_of("/\\");
+    return (pos == std::string::npos) ? p : p.substr(pos+1);
+}
 
+// ----------------- HELP výpisy -----------------
+static void print_banner(const std::string& host, const std::string& port) {
+    std::cout << "\n"
+              << "===============================================\n"
+              << "  MiniDrive Client — connected to " << host << ":" << port << "\n"
+              << "===============================================\n"
+              << "Type HELP to see commands. EXIT to quit.\n\n";
+}
 
-// ================= HANDLERY =================
-void handle_list(const std::vector<std::string>& args) {
-  ensure_connection();
-  std::string path = args.empty() ? "." : args[0];
-  nlohmann::json req = {{"cmd","LIST"}, {"args", {{"path", path}}}};
-  auto resp = g_conn->request(req);
-  if (resp.value("status","ERROR") == "OK") {
-    for (auto& e : resp["data"]["entries"]) {
-      std::cout << (e["type"]=="dir" ? "[DIR]  " : "      ")
-                << e["name"].get<std::string>();
-      if (e["type"]=="file") std::cout << "  (" << e["size"].get<long long>() << " B)";
-      std::cout << "\n";
+static void print_help_all() {
+    std::cout <<
+R"(Commands (<> required, [] optional):
+
+  LIST [path]
+  UPLOAD <local_path> [remote_path]
+  DOWNLOAD <remote_path> [local_path]
+  DELETE <path>
+  CD <path>
+  MKDIR <path>
+  RMDIR <path>
+  MOVE <src> <dst>
+  COPY <src> <dst>
+  SYNC <src> <dst>
+  HELP [command]
+  EXIT
+)"
+    << std::endl;
+}
+
+static void print_help_cmd(const std::string& CMD) {
+    if (CMD == "LIST")       std::cout << "LIST [path]\n  List directory (default '.')\n";
+    else if (CMD == "UPLOAD")std::cout << "UPLOAD <local_path> [remote_path]\n  If [remote_path] missing, uses basename(local_path)\n";
+    else if (CMD == "DOWNLOAD")std::cout << "DOWNLOAD <remote_path> [local_path]\n  If [local_path] missing, uses basename(remote_path)\n";
+    else if (CMD == "DELETE")std::cout << "DELETE <path>\n";
+    else if (CMD == "CD")    std::cout << "CD <path>\n  Change remote working directory\n";
+    else if (CMD == "MKDIR") std::cout << "MKDIR <path>\n";
+    else if (CMD == "RMDIR") std::cout << "RMDIR <path>\n";
+    else if (CMD == "MOVE")  std::cout << "MOVE <src> <dst>\n";
+    else if (CMD == "COPY")  std::cout << "COPY <src> <dst>\n";
+    else if (CMD == "SYNC")  std::cout << "SYNC <src> <dst>\n  Synchronize local->remote\n";
+    else if (CMD == "AUTH")  std::cout << "AUTH <username> <password>\n";
+    else if (CMD == "REGISTER") std::cout << "REGISTER <username> <password>\n";
+    else if (CMD == "HELP")  std::cout << "HELP [command]\n";
+    else if (CMD == "EXIT")  std::cout << "EXIT\n";
+    else std::cout << "Unknown command. Type HELP.\n";
+}
+
+// --- validátor argumentov podľa <> / [] ---------------
+static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size_t& max_all, std::string& usage) {
+    // usage text
+    if (CMD == "LIST")       { usage = "LIST [path]";                         min_req=0; max_all=1; }
+    else if (CMD == "UPLOAD"){ usage = "UPLOAD <local_path> [remote_path]";   min_req=1; max_all=2; }
+    else if (CMD == "DOWNLOAD"){ usage= "DOWNLOAD <remote_path> [local_path]";min_req=1; max_all=2; }
+    else if (CMD == "DELETE"){ usage = "DELETE <path>";                        min_req=1; max_all=1; }
+    else if (CMD == "CD")    { usage = "CD <path>";                            min_req=1; max_all=1; }
+    else if (CMD == "MKDIR") { usage = "MKDIR <path>";                         min_req=1; max_all=1; }
+    else if (CMD == "RMDIR") { usage = "RMDIR <path>";                         min_req=1; max_all=1; }
+    else if (CMD == "MOVE")  { usage = "MOVE <src> <dst>";                     min_req=2; max_all=2; }
+    else if (CMD == "COPY")  { usage = "COPY <src> <dst>";                     min_req=2; max_all=2; }
+    else if (CMD == "SYNC")  { usage = "SYNC <src> <dst>";                     min_req=2; max_all=2; }
+    else if (CMD == "AUTH")  { usage = "AUTH <username> <password>";           min_req=2; max_all=2; }
+    else if (CMD == "REGISTER"){usage="REGISTER <username> <password>";        min_req=2; max_all=2; }
+    else if (CMD == "HELP")  { usage = "HELP [command]";                       min_req=0; max_all=1; }
+    else if (CMD == "EXIT" || CMD=="QUIT") { usage = "EXIT";                   min_req=0; max_all=0; }
+    else { usage = ""; min_req=0; max_all=0; return false; }
+
+    if (have < min_req) {
+        // vypíš, ktoré <...> chýbajú (iba stručne)
+        std::cout << "[warning] missing required argument(s) for " << CMD << ". Usage: " << usage << "\n";
+        return false;
     }
-  } else {
-    std::cout << "ERROR " << resp.value("code", -1) << ": "
-              << resp.value("message", "") << "\n";
-  }
+    if (have > max_all) {
+        std::cout << "[warning] too many arguments for " << CMD << ". Usage: " << usage << "\n";
+        return false;
+    }
+    return true;
 }
 
-void handle_upload(const std::vector<std::string>& args) {
-  if (args.empty()) {
-    print_usage_error("UPLOAD", "UPLOAD <local> [remote]");
-    return;
-  }
-  std::string local = args[0];
-  std::string remote = (args.size() >= 2) ? args[1] : args[0];
-
-  std::cout << "⬆️  Uploading '" << local << "' → '" << remote << "'\n";
-}
-
-void handle_download(const std::vector<std::string>& args) {
-  if (args.empty()) {
-    print_usage_error("DOWNLOAD", "DOWNLOAD <remote> [local]");
-    return;
-  }
-  std::string remote = args[0];
-  std::string local = (args.size() >= 2) ? args[1] : args[0];
-
-  std::cout << "⬇️  Downloading '" << remote << "' → '" << local << "'\n";
-}
-
-void handle_delete(const std::vector<std::string>& args) {
-  if (args.size() != 1) {
-    print_usage_error("DELETE", "DELETE <path>");
-    return;
-  }
-  std::cout << "🗑️  Deleting '" << args[0] << "'\n";
-}
-
-void handle_cd(const std::vector<std::string>& args) {
-  if (args.size() != 1) {
-    print_usage_error("CD", "CD <path>");
-    return;
-  }
-  std::cout << "📂 Changing directory to '" << args[0] << "'\n";
-}
-
-void handle_mkdir(const std::vector<std::string>& args) {
-  if (args.size() != 1) {
-    print_usage_error("MKDIR", "MKDIR <path>");
-    return;
-  }
-  std::cout << "📁 Creating directory '" << args[0] << "'\n";
-}
-
-void handle_rmdir(const std::vector<std::string>& args) {
-  if (args.size() != 1) {
-    print_usage_error("RMDIR", "RMDIR <path>");
-    return;
-  }
-  std::cout << "🗑️  Removing directory '" << args[0] << "'\n";
-}
-
-void handle_move(const std::vector<std::string>& args) {
-  if (args.size() != 2) {
-    print_usage_error("MOVE", "MOVE <src> <dst>");
-    return;
-  }
-  std::cout << "🚚 Moving '" << args[0] << "' → '" << args[1] << "'\n";
-}
-
-void handle_copy(const std::vector<std::string>& args) {
-  if (args.size() != 2) {
-    print_usage_error("COPY", "COPY <src> <dst>");
-    return;
-  }
-  std::cout << "📄 Copying '" << args[0] << "' → '" << args[1] << "'\n";
-}
-
-void handle_sync(const std::vector<std::string>& args) {
-  if (args.size() != 2) {
-    print_usage_error("SYNC", "SYNC <local_dir> <remote_dir>");
-    return;
-  }
-  std::cout << "🔄 Syncing local='" << args[0] << "' with remote='" << args[1] << "'\n";
-}
-
-} // namespace
-
-
-// ================= MAIN =================
 int main(int argc, char* argv[]) {
-  std::cout << "MiniDrive client (version " << minidrive::version() << ")\n";
-  std::cout << "Type HELP for a list of commands.\n";
-
-  std::string line;
-  while (true) {
-    std::cout << "> ";
-    if (!std::getline(std::cin, line)) break;
-
-    ParsedCommand pc = minidrive::parse_line(line);
-
-    switch (pc.type) {
-      case CommandType::LIST:      handle_list(pc.args); break;
-      case CommandType::UPLOAD:    handle_upload(pc.args); break;
-      case CommandType::DOWNLOAD:  handle_download(pc.args); break;
-      case CommandType::DELETE_CMD:handle_delete(pc.args); break;
-      case CommandType::CD:        handle_cd(pc.args); break;
-      case CommandType::MKDIR:     handle_mkdir(pc.args); break;
-      case CommandType::RMDIR:     handle_rmdir(pc.args); break;
-      case CommandType::MOVE:      handle_move(pc.args); break;
-      case CommandType::COPY:      handle_copy(pc.args); break;
-      case CommandType::SYNC:      handle_sync(pc.args); break;
-      case CommandType::HELP:
-        std::cout << minidrive::help_text();
-        break;
-      case CommandType::EXIT:
-        std::cout << "👋 Bye!\n";
-        return 0;
-      default:
-        if (!line.empty()) {
-          std::cout << "⚠️  Unknown command. Type HELP.\n";
-        }
-        break;
+    std::string host = "127.0.0.1";
+    std::string port = "5050";
+    if (argc >= 2) {
+        std::string ep = argv[1]; // "host:port"
+        auto pos = ep.rfind(':');
+        if (pos == std::string::npos) { std::cerr << "Usage: client <host:port>\n"; return 1; }
+        host = ep.substr(0, pos);
+        port = ep.substr(pos + 1);
     }
-  }
 
-  return 0;
+    try {
+        asio::io_context io;
+        tcp::resolver r(io);
+        auto eps = r.resolve(host, port);
+        tcp::socket sock(io);
+        asio::connect(sock, eps);
+        std::cout << "[client] connected to " << host << ":" << port << "\n";
+        print_banner(host, port);
+
+        std::string line;
+        while (true) {
+            std::cout << "> ";
+            if (!std::getline(std::cin, line)) break;
+            if (line.empty()) continue;
+
+            std::vector<std::string> toks;
+            split_words(line, toks);
+            if (toks.empty()) continue;
+
+            std::string cmd = toks[0];
+            std::string CMD = to_upper(cmd);
+
+            // HELP (globálny aj HELP <cmd>)
+            if (CMD == "HELP") {
+                if (toks.size() == 1) { print_help_all(); continue; }
+                std::string which = to_upper(toks[1]);
+                print_help_cmd(which);
+                continue;
+            }
+            if (CMD == "EXIT" || CMD == "QUIT") break;
+
+            // validácia počtu argov podľa <> / []
+            size_t min_req=0, max_all=0;
+            std::string usage;
+            size_t have = (toks.size() >= 2) ? (toks.size()-1) : 0;
+            if (!need_args(CMD, have, min_req, max_all, usage)) {
+                if (usage.size()) std::cout << "[client] hint: " << usage << "\n";
+                continue;
+            }
+
+            // Naplnenie args (s defaultmi pre voliteľné)
+            nlohmann::json args = nlohmann::json::object();
+
+            if (CMD == "LIST") {
+                args["path"] = (have >= 1) ? toks[1] : ".";
+            } else if (CMD == "UPLOAD") {
+                std::string local = toks[1];
+                std::string remote = (have >= 2) ? toks[2] : basename_of(local);
+                args["local"] = local; args["remote"] = remote;
+            } else if (CMD == "DOWNLOAD") {
+                std::string remote = toks[1];
+                std::string local = (have >= 2) ? toks[2] : basename_of(remote);
+                args["remote"] = remote; args["local"] = local;
+            } else if (CMD == "DELETE") {
+                args["path"] = toks[1];
+            } else if (CMD == "CD") {
+                args["path"] = toks[1];
+            } else if (CMD == "MKDIR") {
+                args["path"] = toks[1];
+            } else if (CMD == "RMDIR") {
+                args["path"] = toks[1];
+            } else if (CMD == "MOVE") {
+                args["src"] = toks[1]; args["dst"] = toks[2];
+            } else if (CMD == "COPY") {
+                args["src"] = toks[1]; args["dst"] = toks[2];
+            } else if (CMD == "SYNC") {
+                args["src"] = toks[1]; args["dst"] = toks[2];
+            } else if (CMD == "AUTH") {
+                args["username"] = toks[1]; args["password"] = toks[2];
+            } else if (CMD == "REGISTER") {
+                args["username"] = toks[1]; args["password"] = toks[2];
+            } else {
+                std::cout << "[warning] unknown command. Type HELP.\n";
+                continue;
+            }
+
+            // Odoslanie žiadosti
+            nlohmann::json req = {{"cmd", CMD}, {"args", args}};
+            send_json(sock, req);
+
+            // Odpoveď - zatial 
+            nlohmann::json resp;
+            if (!recv_json(sock, resp)) { std::cout << "[client] server closed\n"; break; }
+
+            if (resp.value("status","ERROR") == "OK") {
+                std::string msg = resp.value("message", "");
+                std::cout << "[ok] OK" << (msg.empty() ? "" : " - " + msg) << "\n";
+            } else {
+                std::cout << "[error] ERROR " << resp.value("code",-1) << ": "
+                          << resp.value("message","") << "\n";
+            }
+        }
+
+        std::cout << "[client] bye\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[error] fatal: " << e.what() << "\n";
+        return 1;
+    }
 }
