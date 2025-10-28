@@ -34,7 +34,7 @@ namespace minidrive
     CommandType command_from_string(std::string_view sv)
     {
         std::string s(sv);
-        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); }); // ked je malym daj na velke
         if (s == "LIST")
             return CommandType::LIST;
         if (s == "UPLOAD")

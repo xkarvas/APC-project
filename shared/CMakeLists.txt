@@ -1,6 +1,7 @@
 add_library(minidrive_shared STATIC
     src/version.cpp
     src/commands.cpp
+    src/protocol.cpp
 )
 
 target_include_directories(minidrive_shared

@@ -2,9 +2,13 @@
 #include <string>
 #include "minidrive/version.hpp"
 #include "minidrive/commands.hpp"
+#include "connection.hpp"
 
 using minidrive::ParsedCommand;
 using minidrive::CommandType;
+
+static std::unique_ptr<minidrive::Connection> g_conn;
+
 
 namespace {
 
@@ -14,15 +18,34 @@ void print_usage_error(const std::string& cmd, const std::string& usage) {
             << "    " << usage << "\n";
 }
 
+
+void ensure_connection() {
+  if (!g_conn) {
+    g_conn = std::make_unique<minidrive::Connection>();
+    // host/port napevno; neskôr z argv
+    g_conn->connect("127.0.0.1", "5050");
+  }
+}
+
+
+
 // ================= HANDLERY =================
 void handle_list(const std::vector<std::string>& args) {
-  if (args.size() > 1) {
-    print_usage_error("LIST", "LIST [path]");
-    return;
+  ensure_connection();
+  std::string path = args.empty() ? "." : args[0];
+  nlohmann::json req = {{"cmd","LIST"}, {"args", {{"path", path}}}};
+  auto resp = g_conn->request(req);
+  if (resp.value("status","ERROR") == "OK") {
+    for (auto& e : resp["data"]["entries"]) {
+      std::cout << (e["type"]=="dir" ? "[DIR]  " : "      ")
+                << e["name"].get<std::string>();
+      if (e["type"]=="file") std::cout << "  (" << e["size"].get<long long>() << " B)";
+      std::cout << "\n";
+    }
+  } else {
+    std::cout << "ERROR " << resp.value("code", -1) << ": "
+              << resp.value("message", "") << "\n";
   }
-  std::cout << "📁 Listing files";
-  if (!args.empty()) std::cout << " in path: " << args[0];
-  std::cout << "\n";
 }
 
 void handle_upload(const std::vector<std::string>& args) {
@@ -108,7 +131,7 @@ void handle_sync(const std::vector<std::string>& args) {
 
 // ================= MAIN =================
 int main(int argc, char* argv[]) {
-  std::cout << "MiniDrive client (version " << minidrive::version << ")\n";
+  std::cout << "MiniDrive client (version " << minidrive::version() << ")\n";
   std::cout << "Type HELP for a list of commands.\n";
 
   std::string line;
