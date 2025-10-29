@@ -10,6 +10,9 @@
 #include <cstdint>
 #include <cstring>
 
+#include <filesystem>
+namespace fs = std::filesystem;
+
 using asio::ip::tcp;
 
 // --- big-endian helpers (bez arpa/inet) ---
@@ -33,7 +36,7 @@ static bool recv_json(tcp::socket& s, nlohmann::json& out) {
     std::string payload(len, '\0');
     asio::read(s, asio::buffer(payload.data(), len), ec);
     if (ec) return false;
-    std::cout << "[server] <- " << payload << "\n";
+    // std::cout << "[server] <- " << payload << "\n";
     out = nlohmann::json::parse(payload);
     return true;
 }
@@ -43,7 +46,7 @@ static void send_json(tcp::socket& s, const nlohmann::json& j) {
     write_u32_be(static_cast<uint32_t>(payload.size()), hdr);
     asio::write(s, asio::buffer(hdr, 4));
     asio::write(s, asio::buffer(payload.data(), payload.size()));
-    std::cout << "[server] -> " << payload << "\n";
+    // std::cout << "[server] -> " << payload << "\n";
 }
 
 static void handle_client(tcp::socket sock) {
@@ -55,26 +58,46 @@ static void handle_client(tcp::socket sock) {
 
             const std::string cmd = req.value("cmd", "");
             const auto args = req.value("args", nlohmann::json::object());
-            std::cout << "[server] cmd=" << cmd << " args=" << args.dump() << "\n";
+            // std::cout << "[server] cmd=" << cmd << " args=" << args.dump() << "\n";
 
-            // STUB odpoveď pre všetky podporované príkazy
-            static const char* supported[] = {
-                "LIST","MKDIR","RMDIR","DELETE","CD","MOVE","COPY",
-                "UPLOAD","DOWNLOAD","SYNC","AUTH","REGISTER"
-            };
-            bool known = false;
-            for (auto* c : supported) if (cmd == c) { known = true; break; }
+            
+            if (cmd == "LIST") {
+                std::string path = args.value("path", "");
+                std::string result;
+                try {
+                    nlohmann::json files = nlohmann::json::array();
 
-            if (known) {
-                nlohmann::json resp = {
-                    {"status","OK"}, {"code",0}, {"message","stub"},
-                    {"data", { {"echo_cmd",cmd}, {"echo_args",args} }}
-                };
-                send_json(sock, resp);
-            } else {
-                nlohmann::json resp = {{"status","ERROR"},{"code",1},{"message","Unknown cmd"}};
-                send_json(sock, resp);
+                    for (const auto& entry : fs::directory_iterator(path)) {
+                        nlohmann::json item;
+                        item["name"] = entry.path().filename().string();
+
+                        if (entry.is_directory()) {
+                            item["type"] = "directory";
+                            item["size"] = "-";
+                        } else if (entry.is_regular_file()) {
+                            item["type"] = "file";
+                            item["size"] = std::to_string(entry.file_size());
+                        } else if (entry.is_symlink()) {
+                            item["type"] = "symlink";
+                            item["size"] = "-";
+                        } else {
+                            item["type"] = "other";
+                            item["size"] = "-";
+                        }
+
+                        files.push_back(item);
+                    }
+
+                    send_json(sock, {{"status","OK"},{"code",0},{"message","LIST command executed"},{"data", files.dump()}});
+                    std::cout << "[ok] -> " << "list ok" << "\n";
+
+                } catch (const std::exception& e) {
+                    result = std::string("Error: ") + e.what();
+                    send_json(sock, {{"status","ERROR"},{"code",1},{"message","LIST command failed"},{"data", result}});
+                    std::cout << "[error] " << result << std::endl;
+                }               // TODO: implement LIST command
             }
+
         }
     } catch (const std::exception& e) {
         std::cout << "[server] exception: " << e.what() << "\n";

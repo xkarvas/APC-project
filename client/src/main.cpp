@@ -30,7 +30,7 @@ static void send_json(tcp::socket& s, const nlohmann::json& j) {
     write_u32_be(static_cast<uint32_t>(payload.size()), hdr);
     asio::write(s, asio::buffer(hdr, 4));
     asio::write(s, asio::buffer(payload.data(), payload.size()));
-    std::cout << "[client] -> " << payload << "\n";
+    // std::cout << "[client] -> " << payload << "\n";
 }
 static bool recv_json(tcp::socket& s, nlohmann::json& out) {
     unsigned char hdr[4];
@@ -41,7 +41,7 @@ static bool recv_json(tcp::socket& s, nlohmann::json& out) {
     std::string payload(len, '\0');
     asio::read(s, asio::buffer(payload.data(), len), ec);
     if (ec) return false;
-    std::cout << "[client] <- " << payload << "\n";
+    // std::cout << "[client] <- " << payload << "\n";
     out = nlohmann::json::parse(payload);
     return true;
 }
@@ -61,14 +61,7 @@ static std::string basename_of(const std::string& p) {
     return (pos == std::string::npos) ? p : p.substr(pos+1);
 }
 
-// ----------------- HELP výpisy -----------------
-static void print_banner(const std::string& host, const std::string& port) {
-    std::cout << "\n"
-              << "===============================================\n"
-              << "  MiniDrive Client — connected to " << host << ":" << port << "\n"
-              << "===============================================\n"
-              << "Type HELP to see commands. EXIT to quit.\n\n";
-}
+
 
 static void print_help_all() {
     std::cout <<
@@ -150,14 +143,24 @@ int main(int argc, char* argv[]) {
         port = ep.substr(pos + 1);
     }
 
+    auto root = "/Users/ervinkarvas/Desktop/FIIT/APC/root";  // neskor bude argv[2]
+    auto dir = root;
+
     try {
         asio::io_context io;
         tcp::resolver r(io);
         auto eps = r.resolve(host, port);
         tcp::socket sock(io);
         asio::connect(sock, eps);
+
+
+        std::cout 
+              << "===============================================\n"
+              << "  MiniDrive Client — connected to " << host << ":" << port << "\n"
+              << "===============================================\n";
         std::cout << "[client] connected to " << host << ":" << port << "\n";
-        print_banner(host, port);
+        std::cout << "[warning] operating in public mode - files are visible to everyone\n";
+        std::cout << "===============================================\n\n";
 
         std::string line;
         while (true) {
@@ -179,7 +182,7 @@ int main(int argc, char* argv[]) {
                 print_help_cmd(which);
                 continue;
             }
-            if (CMD == "EXIT" || CMD == "QUIT") break;
+            if (CMD == "EXIT" || CMD == "QUIT" || CMD == "E" || CMD == "Q") break;
 
             // validácia počtu argov podľa <> / []
             size_t min_req=0, max_all=0;
@@ -194,7 +197,7 @@ int main(int argc, char* argv[]) {
             nlohmann::json args = nlohmann::json::object();
 
             if (CMD == "LIST") {
-                args["path"] = (have >= 1) ? toks[1] : ".";
+                args["path"] = (have >= 1) ? toks[1] : dir;
             } else if (CMD == "UPLOAD") {
                 std::string local = toks[1];
                 std::string remote = (have >= 2) ? toks[2] : basename_of(local);
@@ -234,12 +237,46 @@ int main(int argc, char* argv[]) {
             nlohmann::json resp;
             if (!recv_json(sock, resp)) { std::cout << "[client] server closed\n"; break; }
 
-            if (resp.value("status","ERROR") == "OK") {
-                std::string msg = resp.value("message", "");
-                std::cout << "[ok] OK" << (msg.empty() ? "" : " - " + msg) << "\n";
+            if (resp.value("status", "ERROR") == "OK") {
+                std::string msg = resp.value("data", "");
+
+                if (msg.empty()) {
+                    std::cout << "\n[ok] OK\n\nadresár je prázdny\n\n";
+                } else {
+                    std::cout << "\n[ok] OK\n\n";
+
+                    try {
+                        // 🔹 Skús parse-nuť obsah "data" (je to string, ale vo formáte JSON)
+                        nlohmann::json files = nlohmann::json::parse(msg);
+
+                        if (files.is_array()) {
+                            std::cout << std::left << std::setw(30) << "Názov"
+                                    << std::setw(12) << "Typ"
+                                    << std::setw(10) << "Veľkosť (B)" << "\n";
+                            std::cout << std::string(55, '-') << "\n";
+
+                            for (const auto& file : files) {
+                                std::string name = file.value("name", "");
+                                std::string type = file.value("type", "");
+                                std::string size = file.value("size", "-");
+
+                                std::cout << std::left << std::setw(30) << name
+                                        << std::setw(12) << type
+                                        << std::setw(10) << size << "\n";
+                            }
+                            std::cout << std::string(55, '-') << "\n\n";
+                        } else {
+                            // Ak to nie je pole, vypíš ako text
+                            std::cout << msg << "\n";
+                        }
+                    } catch (const std::exception& e) {
+                        // 🔹 Ak to nie je validný JSON, vypíš ako obyčajný text
+                        std::cout << msg << "\n";
+                    }
+                }
             } else {
-                std::cout << "[error] ERROR " << resp.value("code",-1) << ": "
-                          << resp.value("message","") << "\n";
+                std::cout << "\n[error]\n"
+                        << resp.value("data", "") << "\n\n";
             }
         }
 

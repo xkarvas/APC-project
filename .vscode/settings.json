@@ -39,6 +39,18 @@
         "cwctype": "cpp",
         "deque": "cpp",
         "execution": "cpp",
-        "ratio": "cpp"
-    }
+        "ratio": "cpp",
+        "__node_handle": "cpp",
+        "__split_buffer": "cpp",
+        "forward_list": "cpp",
+        "list": "cpp",
+        "map": "cpp",
+        "set": "cpp",
+        "span": "cpp",
+        "unordered_map": "cpp",
+        "vector": "cpp",
+        "regex": "cpp",
+        "unordered_set": "cpp"
+    },
+    "C_Cpp.errorSquiggles": "disabled"
 }
