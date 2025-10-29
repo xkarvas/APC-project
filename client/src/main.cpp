@@ -10,6 +10,10 @@
 #include <cstdint>
 #include <cstring>
 
+
+#include <filesystem>
+namespace fs = std::filesystem;
+
 using asio::ip::tcp;
 
 // --- big-endian helpers ---
@@ -130,6 +134,31 @@ static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size
     return true;
 }
 
+
+
+bool is_path_under(const std::string& path1, const std::string& path2) {
+    try {
+        fs::path rootPath = fs::weakly_canonical(path1);
+        fs::path targetPath = fs::weakly_canonical(path2);
+
+        // over, či začiatok targetPath == rootPath
+        auto rootIt = rootPath.begin();
+        auto pathIt = targetPath.begin();
+
+        for (; rootIt != rootPath.end() && pathIt != targetPath.end(); ++rootIt, ++pathIt) {
+            if (*rootIt != *pathIt)
+                return false;
+        }
+
+        // Ak sme prešli celý rootPath bez rozdielu, path je pod rootom alebo rovná
+        return std::distance(rootPath.begin(), rootPath.end()) <= std::distance(targetPath.begin(), targetPath.end());
+    }
+    catch (...) {
+        return false; // ak sa niečo pokazí (napr. neexistujúca cesta)
+    }
+}
+
+
 int main(int argc, char* argv[]) {
     std::string host = "127.0.0.1";
     std::string port = "5050";
@@ -192,7 +221,7 @@ int main(int argc, char* argv[]) {
             size_t have = (toks.size() >= 2) ? (toks.size()-1) : 0;
             if (!need_args(CMD, have, min_req, max_all, usage)) {
                 if (usage.size()) std::cout << "[client] hint: " << usage << "\n";
-                else std::cout << "[warning] unknown command. Type HELP.\n";
+                else std::cout << "\n[warning] unknown command. Type HELP.\n\n";
                 continue;
             }
 
@@ -226,8 +255,15 @@ int main(int argc, char* argv[]) {
 
             } else if (CMD == "MKDIR") {
                 args["path"] = toks[1];
+
+
             } else if (CMD == "RMDIR") {
                 args["path"] = toks[1];
+
+                if (!is_path_under(dir, toks[1]) || dir == toks[1]) {
+                    std::cout << "\n\n[error] cannot remove current or parent directory '" << dir << "'\n\n";
+                    continue;
+                }
             } else if (CMD == "MOVE") {
                 args["src"] = toks[1]; args["dst"] = toks[2];
             } else if (CMD == "COPY") {
@@ -240,7 +276,7 @@ int main(int argc, char* argv[]) {
             }
 
             // Odoslanie žiadosti
-            nlohmann::json req = {{"cmd", CMD}, {"args", args}};
+            nlohmann::json req = {{"cmd", CMD}, {"args", args}, {"root", root}};
             send_json(sock, req);
 
             // Odpoveď - zatial 
@@ -293,10 +329,26 @@ int main(int argc, char* argv[]) {
             else if (CMD == "CD") {
                 if (resp.value("status", "ERROR") == "OK") {
                     dir = args["path"].get<std::string>();
-                    std::cout << "[ok] changed directory to '" << dir << "'\n";
+                    std::cout << "\n[ok] changed directory to '" << dir << "'\n\n";
                 } else {
-                    std::cout << "[error] failed to change directory to '" << args["path"].get<std::string>() << "'\n"
-                    << "Reason: " << resp.value("message", "") << "\n";
+                    std::cout << "\n[error] failed to change directory to '" << args["path"].get<std::string>() << "'\n"
+                    << "Reason: " << resp.value("message", "") << "\n\n";
+                }
+            }
+            else if (CMD == "MKDIR") {
+                if (resp.value("status", "ERROR") == "OK") {
+                    std::cout << "\n[ok] directory created: '" << args["path"].get<std::string>() << "'\n\n";
+                } else {
+                    std::cout << "\n[error] failed to create directory '" << args["path"].get<std::string>() << "'\n"
+                    << "Reason: " << resp.value("message", "") << "\n\n";
+                }
+            }
+            else if (CMD == "RMDIR") {
+                if (resp.value("status", "ERROR") == "OK") {
+                    std::cout << "\n[ok] directory removed: '" << args["path"].get<std::string>() << "'\n\n";
+                } else {
+                    std::cout << "\n[error] failed to remove directory '" << args["path"].get<std::string>() << "'\n"
+                    << "Reason: " << resp.value("message", "") << "\n\n";
                 }
             }
 
@@ -306,9 +358,9 @@ int main(int argc, char* argv[]) {
                 std::string status = resp.value("status", "ERROR");
                 std::string message = resp.value("message", "");
                 if (status == "OK") {
-                    std::cout << "[ok] " << message << "\n";
+                    std::cout << "\n[ok] " << message << "\n\n";
                 } else {
-                    std::cout << "[error] " << message << "\n";
+                    std::cout << "\n[error] " << message << "\n\n";
                 }
             }
         }
