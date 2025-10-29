@@ -128,8 +128,7 @@ static void handle_client(tcp::socket sock) {
                     send_json(sock, {{"cmd","LIST"},{"status","ERROR"},{"code",1},{"message","LIST command failed"},{"data", result}});
                     std::cout << "[error] list ->" << result << std::endl;
                 }               // TODO: implement LIST command
-            }
-            else if (cmd == "CD") {
+            } else if (cmd == "CD") {
                 std::string path = args.value("path", "");
 
                 if (!is_path_under_root(root, path)) {
@@ -208,9 +207,33 @@ static void handle_client(tcp::socket sock) {
                     send_json(sock, {{"cmd","RMDIR"},{"status","ERROR"},{"code",1},{"message","Failed to remove directory"}});
                     std::cout << "[error] rmdir -> exception: " << e.what() << "\n";
                 }
+            } else if (cmd == "DELETE") {
+                std::string path = args.value("path", "");
+                if (!is_path_under_root(root, path)) {
+                    send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
+                    std::cout << "[error] delete -> access denied, path: " << path << ", root: " << root << "\n";
+                    continue;
+                }
+                try {
+                    if (std::filesystem::exists(path)) {
+                        if (std::filesystem::is_directory(path)) {
+                            send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",1},{"message","Path is directory not a file"}});
+                            std::cout << "[error] delete -> path is not a file, path: '" << path << "'\n";
+                            continue;
+                        }
+                        std::filesystem::remove(path);
+                        send_json(sock, {{"cmd","DELETE"},{"status","OK"},{"code",0},{"message","File deleted"}});
+                        std::cout << "[ok] delete -> removed file at '" << path << "'\n";
+                    } else {
+                        send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",1},{"message","File does not exist"}});
+                        std::cout << "[error] delete -> file does not exist, path: '" << path << "'\n";
+                    }
+                }
+                catch (const std::exception& e) {
+                    send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",1},{"message","Failed to delete file"}});
+                    std::cout << "[error] delete -> exception: " << e.what() << "\n";
+                }
             }
-            
-            
             
             
             else {

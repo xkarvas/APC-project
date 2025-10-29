@@ -351,6 +351,14 @@ int main(int argc, char* argv[]) {
                     << "Reason: " << resp.value("message", "") << "\n\n";
                 }
             }
+            else if (CMD == "DELETE") {
+                if (resp.value("status", "ERROR") == "OK") {
+                    std::cout << "\n[ok] file deleted: '" << args["path"].get<std::string>() << "'\n\n";
+                } else {
+                    std::cout << "\n[error] failed to delete file '" << args["path"].get<std::string>() << "'\n"
+                    << "Reason: " << resp.value("message", "") << "\n\n";
+                }
+            }
 
 
 
