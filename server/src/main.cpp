@@ -88,17 +88,40 @@ static void handle_client(tcp::socket sock) {
                         files.push_back(item);
                     }
 
-                    send_json(sock, {{"status","OK"},{"code",0},{"message","LIST command executed"},{"data", files.dump()}});
-                    std::cout << "[ok] -> " << "list ok" << "\n";
+                    send_json(sock, {{"cmd","LIST"},{"status","OK"},{"code",0},{"message","LIST command executed"},{"data", files.dump()}});
+                    std::cout << "[ok] list -> " << "path: " << path <<"\n";
 
                 } catch (const std::exception& e) {
                     result = std::string("Error: ") + e.what();
-                    send_json(sock, {{"status","ERROR"},{"code",1},{"message","LIST command failed"},{"data", result}});
-                    std::cout << "[error] " << result << std::endl;
+                    send_json(sock, {{"cmd","LIST"},{"status","ERROR"},{"code",1},{"message","LIST command failed"},{"data", result}});
+                    std::cout << "[error] list ->" << result << std::endl;
                 }               // TODO: implement LIST command
             }
+            else if (cmd == "CD") {
+                std::string path = args.value("path", "");
+                try {
+                    if (std::filesystem::exists(path)) {
+                        if (std::filesystem::is_directory(path)) {
+                            // Je to priečinok
+                            send_json(sock, {{"cmd","CD"},{"status","OK"},{"code",0},{"path", path}});
+                            std::cout << "[ok] cd -> ok, changed to '" << path << "'" << "\n";
 
-        }
+                        } else {
+                            send_json(sock, {{"cmd","CD"},{"status","WARNING"},{"code",-1},{"path", path},{"message","Not a directory"}});
+                            std::cout << "[error] cd -> not a directory, path: '" << path << "'\n";
+                        }
+                    } else {
+                        // neexistuje
+                        send_json(sock, {{"cmd","CD"},{"status","ERROR"},{"code",1},{"path", path},{"message","Directory does not exist"}});
+                        std::cout << "[error] cd -> directory does not exist, path: '" << path << "'\n";
+                    }
+                }
+                catch (const std::exception& e) {
+                    send_json(sock, {{"cmd","CD"},{"status","ERROR"},{"code",1},{"path", path},{"message","Unknown error"}});
+                    std::cout << "[error] cd -> exception: " << e.what() << "\n";
+                }
+            }
+        } 
     } catch (const std::exception& e) {
         std::cout << "[server] exception: " << e.what() << "\n";
     }

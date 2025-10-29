@@ -94,8 +94,6 @@ static void print_help_cmd(const std::string& CMD) {
     else if (CMD == "MOVE")  std::cout << "MOVE <src> <dst>\n";
     else if (CMD == "COPY")  std::cout << "COPY <src> <dst>\n";
     else if (CMD == "SYNC")  std::cout << "SYNC <src> <dst>\n  Synchronize local->remote\n";
-    else if (CMD == "AUTH")  std::cout << "AUTH <username> <password>\n";
-    else if (CMD == "REGISTER") std::cout << "REGISTER <username> <password>\n";
     else if (CMD == "HELP")  std::cout << "HELP [command]\n";
     else if (CMD == "EXIT")  std::cout << "EXIT\n";
     else std::cout << "Unknown command. Type HELP.\n";
@@ -143,8 +141,9 @@ int main(int argc, char* argv[]) {
         port = ep.substr(pos + 1);
     }
 
-    auto root = "/Users/ervinkarvas/Desktop/FIIT/APC/root";  // neskor bude argv[2]
-    auto dir = root;
+
+    std::string root = "/Users/ervinkarvas/Desktop/FIIT/APC/root";  // neskor bude argv[2] -- potrebne potom overit cestu pri prihlaseni
+    std::string dir = root;
 
     try {
         asio::io_context io;
@@ -172,9 +171,13 @@ int main(int argc, char* argv[]) {
             split_words(line, toks);
             if (toks.empty()) continue;
 
+
             std::string cmd = toks[0];
             std::string CMD = to_upper(cmd);
 
+            if (CMD == "EXIT" || CMD == "QUIT" || CMD == "E" || CMD == "Q") {
+                break;
+            }
             // HELP (globálny aj HELP <cmd>)
             if (CMD == "HELP") {
                 if (toks.size() == 1) { print_help_all(); continue; }
@@ -182,7 +185,6 @@ int main(int argc, char* argv[]) {
                 print_help_cmd(which);
                 continue;
             }
-            if (CMD == "EXIT" || CMD == "QUIT" || CMD == "E" || CMD == "Q") break;
 
             // validácia počtu argov podľa <> / []
             size_t min_req=0, max_all=0;
@@ -190,6 +192,7 @@ int main(int argc, char* argv[]) {
             size_t have = (toks.size() >= 2) ? (toks.size()-1) : 0;
             if (!need_args(CMD, have, min_req, max_all, usage)) {
                 if (usage.size()) std::cout << "[client] hint: " << usage << "\n";
+                else std::cout << "[warning] unknown command. Type HELP.\n";
                 continue;
             }
 
@@ -210,6 +213,17 @@ int main(int argc, char* argv[]) {
                 args["path"] = toks[1];
             } else if (CMD == "CD") {
                 args["path"] = toks[1];
+                std::string newPath = args["path"].get<std::string>();
+
+                if (newPath == "..") {
+                    dir = root;
+                    std::cout << "\n[ok] changed directory to '" << dir << "' (root)\n\n";
+                    continue;
+                } else if (newPath == ".") {
+                    std::cout << "\n[ok] stayed in directory '" << dir << "'\n\n";
+                    continue;
+                }
+
             } else if (CMD == "MKDIR") {
                 args["path"] = toks[1];
             } else if (CMD == "RMDIR") {
@@ -220,10 +234,6 @@ int main(int argc, char* argv[]) {
                 args["src"] = toks[1]; args["dst"] = toks[2];
             } else if (CMD == "SYNC") {
                 args["src"] = toks[1]; args["dst"] = toks[2];
-            } else if (CMD == "AUTH") {
-                args["username"] = toks[1]; args["password"] = toks[2];
-            } else if (CMD == "REGISTER") {
-                args["username"] = toks[1]; args["password"] = toks[2];
             } else {
                 std::cout << "[warning] unknown command. Type HELP.\n";
                 continue;
@@ -237,50 +247,73 @@ int main(int argc, char* argv[]) {
             nlohmann::json resp;
             if (!recv_json(sock, resp)) { std::cout << "[client] server closed\n"; break; }
 
-            if (resp.value("status", "ERROR") == "OK") {
-                std::string msg = resp.value("data", "");
+            if (CMD == "LIST") {
+                if (resp.value("status", "ERROR") == "OK") {
+                    std::string msg = resp.value("data", "");
 
-                if (msg.empty()) {
-                    std::cout << "\n[ok] OK\n\nadresár je prázdny\n\n";
-                } else {
-                    std::cout << "\n[ok] OK\n\n";
+                    if (msg.empty()) {
+                        std::cout << "\n[ok] OK\n\nadresár je prázdny\n\n";
+                    } else {
+                        std::cout << "\n[ok] OK\n\n";
 
-                    try {
-                        // 🔹 Skús parse-nuť obsah "data" (je to string, ale vo formáte JSON)
-                        nlohmann::json files = nlohmann::json::parse(msg);
+                        try {
+                            // 🔹 Skús parse-nuť obsah "data" (je to string, ale vo formáte JSON)
+                            nlohmann::json files = nlohmann::json::parse(msg);
 
-                        if (files.is_array()) {
-                            std::cout << std::left << std::setw(30) << "Názov"
-                                    << std::setw(12) << "Typ"
-                                    << std::setw(10) << "Veľkosť (B)" << "\n";
-                            std::cout << std::string(55, '-') << "\n";
+                            if (files.is_array()) {
+                                std::cout << std::left << std::setw(30) << "Názov"
+                                        << std::setw(12) << "Typ"
+                                        << std::setw(10) << "Veľkosť (B)" << "\n";
+                                std::cout << std::string(55, '-') << "\n";
 
-                            for (const auto& file : files) {
-                                std::string name = file.value("name", "");
-                                std::string type = file.value("type", "");
-                                std::string size = file.value("size", "-");
+                                for (const auto& file : files) {
+                                    std::string name = file.value("name", "");
+                                    std::string type = file.value("type", "");
+                                    std::string size = file.value("size", "-");
 
-                                std::cout << std::left << std::setw(30) << name
-                                        << std::setw(12) << type
-                                        << std::setw(10) << size << "\n";
+                                    std::cout << std::left << std::setw(30) << name
+                                            << std::setw(12) << type
+                                            << std::setw(10) << size << "\n";
+                                }
+                                std::cout << std::string(55, '-') << "\n\n";
+                            } else {
+                                // Ak to nie je pole, vypíš ako text
+                                std::cout << msg << "\n";
                             }
-                            std::cout << std::string(55, '-') << "\n\n";
-                        } else {
-                            // Ak to nie je pole, vypíš ako text
+                        } catch (const std::exception& e) {
+                            // 🔹 Ak to nie je validný JSON, vypíš ako obyčajný text
                             std::cout << msg << "\n";
                         }
-                    } catch (const std::exception& e) {
-                        // 🔹 Ak to nie je validný JSON, vypíš ako obyčajný text
-                        std::cout << msg << "\n";
                     }
+                } else {
+                    std::cout << "\n[error]\n"
+                            << resp.value("data", "") << "\n\n";
                 }
-            } else {
-                std::cout << "\n[error]\n"
-                        << resp.value("data", "") << "\n\n";
+            }
+            else if (CMD == "CD") {
+                if (resp.value("status", "ERROR") == "OK") {
+                    dir = args["path"].get<std::string>();
+                    std::cout << "[ok] changed directory to '" << dir << "'\n";
+                } else {
+                    std::cout << "[error] failed to change directory to '" << args["path"].get<std::string>() << "'\n"
+                    << "Reason: " << resp.value("message", "") << "\n";
+                }
+            }
+
+
+
+            else {
+                std::string status = resp.value("status", "ERROR");
+                std::string message = resp.value("message", "");
+                if (status == "OK") {
+                    std::cout << "[ok] " << message << "\n";
+                } else {
+                    std::cout << "[error] " << message << "\n";
+                }
             }
         }
 
-        std::cout << "[client] bye\n";
+        std::cout << "[client] disconnecting ...\n\n";
     } catch (const std::exception& e) {
         std::cerr << "[error] fatal: " << e.what() << "\n";
         return 1;
