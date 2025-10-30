@@ -73,6 +73,23 @@ bool is_path_under_root(const std::string& root, const std::string& path) {
     }
 }
 
+
+static uintmax_t directory_size(const fs::path& dir) {
+    uintmax_t total = 0;
+    try {
+        if (fs::exists(dir) && fs::is_directory(dir)) {
+            for (auto const& entry : fs::recursive_directory_iterator(dir)) {
+                if (entry.is_regular_file()) {
+                    total += entry.file_size();
+                }
+            }
+        }
+    } catch (...) {
+        // ak zlyhá prístup k niektorému súboru, len preskočíme
+    }
+    return total;
+}
+
 static void handle_client(tcp::socket sock) {
     try {
         std::cout << "[server] client connected from " << sock.remote_endpoint() << "\n";
@@ -105,7 +122,8 @@ static void handle_client(tcp::socket sock) {
 
                         if (entry.is_directory()) {
                             item["type"] = "directory";
-                            item["size"] = "-";
+                            uintmax_t size = directory_size(entry.path());
+                            item["size"] = std::to_string(size);
                         } else if (entry.is_regular_file()) {
                             item["type"] = "file";
                             item["size"] = std::to_string(entry.file_size());
@@ -232,6 +250,74 @@ static void handle_client(tcp::socket sock) {
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",1},{"message","Failed to delete file"}});
                     std::cout << "[error] delete -> exception: " << e.what() << "\n";
+                }
+            } else if (cmd == "MOVE") {
+                std::string src = args.value("src", "");
+                std::string dst = args.value("dst", "");
+
+                if (!is_path_under_root(root, src) || !is_path_under_root(root, dst)) {
+                    send_json(sock, {{"cmd","MOVE"},{"status","ERROR"},{"code",2},{"message","Access denied: source or destination path is outside root (" + root + ")"}});
+                    std::cout << "[error] move -> access denied, src: " << src << ", dst: " << dst << ", root: " << root << "\n";
+                    continue;
+                }
+
+                try {
+                    if (std::filesystem::exists(src)) {
+                        std::filesystem::rename(src, dst);
+                        send_json(sock, {{"cmd","MOVE"},{"status","OK"},{"code",0},{"message","Move/Rename successful"}});
+                        std::cout << "[ok] move -> moved/renamed from '" << src << "' to '" << dst << "'\n";
+                    } else {
+                        send_json(sock, {{"cmd","MOVE"},{"status","ERROR"},{"code",1},{"message","Source path does not exist"}});
+                        std::cout << "[error] move -> source path does not exist, src: '" << src << "'\n";
+                    }
+                }
+                catch (const std::exception& e) {
+                    send_json(sock, {{"cmd","MOVE"},{"status","ERROR"},{"code",1},{"message","Failed to move/rename"}});
+                    std::cout << "[error] move -> exception: " << e.what() << "\n";
+                }
+            } else if (cmd == "COPY") {
+                std::string src = args.value("src", "");
+                std::string dst = args.value("dst", "");
+
+                if (!is_path_under_root(root, src) || !is_path_under_root(root, dst)) {
+                    send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",2},{"message","Access denied: source or destination path is outside root (" + root + ")"}});
+                    std::cout << "[error] copy -> access denied, src: " << src << ", dst: " << dst << ", root: " << root << "\n";
+                    continue;
+                }
+
+                try {
+                    if (!fs::exists(src)) {
+                        send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",1},{"message","Source does not exist"},{"data", ""}});
+                        std::cout << "[error] copy -> source does not exist: '" << src << "'\n";
+                        continue;
+                    }
+
+                    // 🔒 ochrana proti kopírovaniu do svojho podpriečinka
+                    fs::path srcPath = fs::weakly_canonical(src);
+                    fs::path dstPath = fs::weakly_canonical(dst);
+
+                    if (dstPath.string().find(srcPath.string()) == 0) {
+                        send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",3},
+                                        {"message","Destination is inside source directory (would cause infinite recursion)"},{"data", ""}});
+                        std::cout << "[error] copy -> destination is inside source directory\n";
+                        continue;
+                    }
+                    if (std::filesystem::exists(src)) {
+                        if (std::filesystem::is_directory(src)) {
+                            std::filesystem::copy(src, dst, fs::copy_options::recursive);
+                        } else {
+                            std::filesystem::copy_file(src, dst);
+                        }
+                        send_json(sock, {{"cmd","COPY"},{"status","OK"},{"code",0},{"message","Copy successful"}});
+                        std::cout << "[ok] copy -> copied from '" << src << "' to '" << dst << "'\n";
+                    } else {
+                        send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",1},{"message","Source path does not exist"}});
+                        std::cout << "[error] copy -> source path does not exist, src: '" << src << "'\n";
+                    }
+                }
+                catch (const std::exception& e) {
+                    send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",1},{"message","Failed to copy"}});
+                    std::cout << "[error] copy -> exception: " << e.what() << "\n";
                 }
             }
             

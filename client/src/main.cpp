@@ -358,6 +358,24 @@ int main(int argc, char* argv[]) {
                     std::cout << "\n[error] failed to delete file '" << args["path"].get<std::string>() << "'\n"
                     << "Reason: " << resp.value("message", "") << "\n\n";
                 }
+            } else if (CMD == "MOVE") {
+                if (resp.value("status", "ERROR") == "OK") {
+                    std::cout << "\n[ok] moved/renamed from '" << args["src"].get<std::string>()
+                              << "' to '" << args["dst"].get<std::string>() << "'\n\n";
+                } else {
+                    std::cout << "\n[error] failed to move/rename from '" << args["src"].get<std::string>()
+                              << "' to '" << args["dst"].get<std::string>() << "'\n"
+                              << "Reason: " << resp.value("message", "") << "\n\n";
+                }
+            } else if (CMD == "COPY") {
+                if (resp.value("status", "ERROR") == "OK") {
+                    std::cout << "\n[ok] copied from '" << args["src"].get<std::string>()
+                              << "' to '" << args["dst"].get<std::string>() << "'\n\n";
+                } else {
+                    std::cout << "\n[error] failed to copy from '" << args["src"].get<std::string>()
+                              << "' to '" << args["dst"].get<std::string>() << "'\n"
+                              << "Reason: " << resp.value("message", "") << "\n\n";
+                }
             }
 
 
