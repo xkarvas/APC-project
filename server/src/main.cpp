@@ -387,6 +387,29 @@ static void handle_client(tcp::socket sock) {
 
                 file.close();
                 std::cout << "\n[ok] download finished successfully for " << path << "\n";
+            } else if (cmd == "UPLOAD") {
+                std::string path = args.value("remote", "");
+                std::string filename = fs::path(path).filename().string();
+
+                if (!is_path_under_root(root, path)) {
+                    send_json(sock, {{"cmd","UPLOAD"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
+                    std::cout << "[error] upload -> access denied, path: " << path << ", root: " << root << "\n";
+                    continue;
+                }
+
+                if (fs::is_directory(path) && !fs::exists(path + "/" + filename)) {
+                    send_json(sock, {{"cmd", "UPLOAD"}, {"status", "OK"}, {"message", "Ready to receive chunks"}});
+                } else {
+                    send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "File already exists"}});
+                    std::cout << "[error] upload -> reject upload to '" << path << "'\n";
+                    continue;
+                    
+                }
+                // TODO: implement upload handling
+                continue;
+
+
+
             } else {
                 send_json(sock, {{"cmd", cmd}, {"status","ERROR"}, {"code",1}, {"message","Unknown command"}});
                 std::cout << "[error] unknown command: " << cmd << "\n";

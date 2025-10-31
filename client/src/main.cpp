@@ -109,7 +109,7 @@ static void print_help_cmd(const std::string& CMD) {
 static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size_t& max_all, std::string& usage) {
     // usage text
     if (CMD == "LIST")       { usage = "LIST [path]";                         min_req=0; max_all=1; }
-    else if (CMD == "UPLOAD"){ usage = "UPLOAD <local_path> [remote_path]";   min_req=1; max_all=2; }
+    else if (CMD == "UPLOAD"){ usage = "UPLOAD <local_path> <remote_path>";   min_req=2; max_all=2; }
     else if (CMD == "DOWNLOAD"){ usage= "DOWNLOAD <remote_path> <local_path>";min_req=2; max_all=2; }
     else if (CMD == "DELETE"){ usage = "DELETE <path>";                        min_req=1; max_all=1; }
     else if (CMD == "CD")    { usage = "CD <path>";                            min_req=1; max_all=1; }
@@ -126,11 +126,11 @@ static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size
 
     if (have < min_req) {
         // vypíš, ktoré <...> chýbajú (iba stručne)
-        std::cout << "[warning] missing required argument(s) for " << CMD << ". Usage: " << usage << "\n";
+        std::cout << "\n[warning] missing required argument(s) for " << CMD << ". Usage: " << usage << "\n\n";
         return false;
     }
     if (have > max_all) {
-        std::cout << "[warning] too many arguments for " << CMD << ". Usage: " << usage << "\n";
+        std::cout << "\n[warning] too many arguments for " << CMD << ". Usage: " << usage << "\n\n";
         return false;
     }
     return true;
@@ -242,7 +242,7 @@ int main(int argc, char* argv[]) {
             std::string usage;
             size_t have = (toks.size() >= 2) ? (toks.size()-1) : 0;
             if (!need_args(CMD, have, min_req, max_all, usage)) {
-                if (usage.size()) std::cout << "[client] hint: " << usage << "\n";
+                if (usage.size()) std::cout << "\n[client] hint: " << usage << "\n\n";
                 else std::cout << "\n[warning] unknown command. Type HELP.\n\n";
                 continue;
             }
@@ -343,6 +343,24 @@ int main(int argc, char* argv[]) {
                 /* std::cout << "\n[info] Will download '" << args["remote"] 
                         << "' to directory '" << local_path 
                         << "' as '" << filename << "'\n\n"; */
+
+
+            } else if (CMD == "UPLOAD") {
+                args["local"] = toks[1]; args["remote"] = toks[2];
+
+                if (!(args["remote"].get<std::string>().starts_with("/"))) {
+                    args["remote"] = dir + "/" + args["remote"].get<std::string>();
+                } 
+
+                std::string local_path = args["local"].get<std::string>();
+                if (!fs::exists(local_path) || fs::is_directory(local_path)) {
+                    std::cout << "\n[warning] Local path '" << local_path 
+                            << "' must be an existing file!\n\n";
+                    continue; 
+                }
+
+                std::string filename = fs::path(args["local"].get<std::string>()).filename().string();
+                args["filename"] = filename;
 
 
             } else if (CMD == "SYNC") {
@@ -534,15 +552,46 @@ int main(int argc, char* argv[]) {
                     std::cout << "\n\n[ok] Download completed successfully -> " << out_path << "\n\n";
                     std::cout << "[info] Total time: " << std::fixed << std::setprecision(2) << seconds << " s"
                                     << " (" << speed_mb_s << " MB/s, " << speed_mbps << " Mbit/s)\n\n";
-                } else {
+                } 
+                else {
                     std::cout << "\n[error] failed to download remote '" << args["remote"].get<std::string>()
                               << "' to local '" << args["local"].get<std::string>() << "'\n"
                               << "Reason: " << resp.value("message", "") << "\n\n";
                 }
+            }else if (CMD == "UPLOAD") {
+                if (resp.value("status", "") != "OK") {
+                    std::cout << "\n[error] server rejected upload: "
+                            << resp.value("message", "") << "\n\n";
+                    continue;
+                }
+                const size_t CHUNK_SIZE = 64 * 1024; // 64 KB chunky
+                std::ifstream file(args["local"].get<std::string>(), std::ios::binary);
+                if (!file.is_open()) {
+                    send_json(sock, {{"cmd", "DOWNLOAD"}, {"status", "ERROR"}, {"message", "Cannot open file"}});
+                    continue;
+                }
+
+                int64_t file_size = std::filesystem::file_size(args["local"].get<std::string>());
+                int64_t total_chunks = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+
+                std::cout << "\n[info] Starting upload file '" << args["local"].get<std::string>() << "' of size " << file_size << " bytes in " << total_chunks << " chunks.\n\n";
+
+                // --- 🔹 posielanie chunkov ---
+                for (int64_t i = 0; i < total_chunks; ++i) {
+                    std::vector<char> buffer(CHUNK_SIZE);
+                    file.read(buffer.data(), CHUNK_SIZE);
+                    std::streamsize bytes_read = file.gcount();
+
+                    // poslať chunk serveru
+                    nlohmann::json chunk = {
+                        {"cmd", "UPLOAD"},
+                        {"chunk", i},
+                        {"data", std::string(buffer.data(), bytes_read)}
+                    };
+                    send_json(sock, chunk);
+                }
+                file.close();
             }
-
-
-
             else {
                 std::string status = resp.value("status", "ERROR");
                 std::string message = resp.value("message", "");
