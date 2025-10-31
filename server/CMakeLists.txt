@@ -1,3 +1,7 @@
+#ifndef ASIO_STANDALONE
+#define ASIO_STANDALONE
+#endif
+
 add_executable(minidrive_server
     src/main.cpp
 )
