@@ -9,6 +9,8 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
+
 
 #include <filesystem>
 namespace fs = std::filesystem;
@@ -102,7 +104,6 @@ static void handle_client(tcp::socket sock) {
             const auto root = req.value("root", "");
             // std::cout << "[server] cmd=" << cmd << " args=" << args.dump() << "\n";
 
-            
             if (cmd == "LIST") {
                 std::string path = args.value("path", "");
 
@@ -319,10 +320,74 @@ static void handle_client(tcp::socket sock) {
                     send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",1},{"message","Failed to copy"}});
                     std::cout << "[error] copy -> exception: " << e.what() << "\n";
                 }
-            }
-            
-            
-            else {
+            } else if (cmd == "DOWNLOAD") {
+                std::string path = args.value("remote", "");
+
+                if (!std::filesystem::exists(path) || !std::filesystem::is_regular_file(path)) {
+                    send_json(sock, {{"cmd", "DOWNLOAD"}, {"status", "ERROR"}, {"message", "File not found"}});
+                    continue;
+                }
+
+                const size_t CHUNK_SIZE = 64 * 1024; // 64 KB chunky
+                std::ifstream file(path, std::ios::binary);
+                if (!file.is_open()) {
+                    send_json(sock, {{"cmd", "DOWNLOAD"}, {"status", "ERROR"}, {"message", "Cannot open file"}});
+                    continue;
+                }
+
+                int64_t file_size = std::filesystem::file_size(path);
+                int64_t total_chunks = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+
+                std::cout << "[server] Starting download file '" << path << "' of size " << file_size << " bytes in " << total_chunks << " chunks.\n";   
+                send_json(sock, {
+                    {"cmd", "DOWNLOAD"},
+                    {"status", "OK"},
+                    {"size", file_size},
+                    {"chunk_size", CHUNK_SIZE},
+                    {"total_chunks", total_chunks}
+                });
+
+                char buffer[CHUNK_SIZE];
+                for (size_t i = 0; i < total_chunks; ++i) {
+                    file.read(buffer, CHUNK_SIZE);
+                    std::streamsize bytes_read = file.gcount();
+                    if (bytes_read <= 0) break;
+
+                    // hlavička pre chunk
+                    nlohmann::json header = {
+                        {"chunk_index", static_cast<int64_t>(i)},
+                        {"size", static_cast<int64_t>(bytes_read)}
+                    };
+                    send_json(sock, header);
+
+                    // Pošli dáta chunku
+                    asio::write(sock, asio::buffer(buffer, bytes_read));
+
+                    // Čakaj na potvrdenie od klienta
+                    nlohmann::json ack;
+                    if (!recv_json(sock, ack)) {
+                        std::cout << "[error] client disconnected during download.\n";
+                        break;
+                    }
+
+                    if (ack.value("status", "") != "OK" || ack.value("ack", -1) != (int)i) {
+                        std::cout << "[error] invalid ACK for chunk " << i << " — aborting download.\n";
+                        break;
+                    }
+
+                    double progress = (file_size > 0)
+                    ? (100.0 * static_cast<double>((i + 1) * CHUNK_SIZE > file_size ? file_size : (i + 1) * CHUNK_SIZE) / file_size)
+                    : 0.0;
+
+                    std::cout << "\r[info] sent chunk " << (i + 1) << "/" << total_chunks
+                            << " (" << std::fixed << std::setprecision(1) << progress << "%)" << std::flush;
+                }
+
+                
+
+                file.close();
+                std::cout << "\n[ok] download finished successfully for " << path << "\n";
+            } else {
                 send_json(sock, {{"cmd", cmd}, {"status","ERROR"}, {"code",1}, {"message","Unknown command"}});
                 std::cout << "[error] unknown command: " << cmd << "\n";
             }

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cmath>
+#include <fstream>
 
 
 #include <filesystem>
@@ -109,7 +110,7 @@ static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size
     // usage text
     if (CMD == "LIST")       { usage = "LIST [path]";                         min_req=0; max_all=1; }
     else if (CMD == "UPLOAD"){ usage = "UPLOAD <local_path> [remote_path]";   min_req=1; max_all=2; }
-    else if (CMD == "DOWNLOAD"){ usage= "DOWNLOAD <remote_path> [local_path]";min_req=1; max_all=2; }
+    else if (CMD == "DOWNLOAD"){ usage= "DOWNLOAD <remote_path> <local_path>";min_req=2; max_all=2; }
     else if (CMD == "DELETE"){ usage = "DELETE <path>";                        min_req=1; max_all=1; }
     else if (CMD == "CD")    { usage = "CD <path>";                            min_req=1; max_all=1; }
     else if (CMD == "MKDIR") { usage = "MKDIR <path>";                         min_req=1; max_all=1; }
@@ -192,7 +193,7 @@ int main(int argc, char* argv[]) {
     }
 
 
-    std::string root = "/Users/ervinkarvas/Desktop/FIIT/APC/root";  // neskor bude argv[2] -- potrebne potom overit cestu pri prihlaseni
+    std::string root = "/Users/ervinkarvas/data/root";  // neskor bude argv[2] -- potrebne potom overit cestu pri prihlaseni
     std::string dir = root;
 
     try {
@@ -259,10 +260,6 @@ int main(int argc, char* argv[]) {
                 std::string local = toks[1];
                 std::string remote = (have >= 2) ? toks[2] : basename_of(local);
                 args["local"] = local; args["remote"] = remote;
-            } else if (CMD == "DOWNLOAD") {
-                std::string remote = toks[1];
-                std::string local = (have >= 2) ? toks[2] : basename_of(remote);
-                args["remote"] = remote; args["local"] = local;
             } else if (CMD == "DELETE") {
                 args["path"] = toks[1];
                 if (!(args["path"].get<std::string>().starts_with("/"))) {
@@ -318,6 +315,36 @@ int main(int argc, char* argv[]) {
                 if (!(args["dst"].get<std::string>().starts_with("/"))) {
                     args["dst"] = dir + "/" + args["dst"].get<std::string>();
                 }
+            } else if (CMD == "DOWNLOAD") {
+                args["remote"] = toks[1]; args["local"] = toks[2];
+
+                if (!(args["remote"].get<std::string>().starts_with("/"))) {
+                    args["remote"] = dir + "/" + args["remote"].get<std::string>();
+                } 
+
+                std::string local_path = args["local"].get<std::string>();
+                if (!fs::exists(local_path) || !fs::is_directory(local_path)) {
+                    std::cout << "\n[warning] Local path '" << local_path 
+                            << "' must be an existing directory!\n\n";
+                    continue; 
+                }
+
+                
+
+                std::string filename = fs::path(args["remote"].get<std::string>()).filename().string();
+                args["filename"] = filename;
+
+
+                if (fs::exists(local_path + "/" + filename)) {
+                    std::cout << "\n[warning] File '" << local_path + "/" + filename 
+                            << "' already exists locally! Download aborted to prevent overwrite.\n\n";
+                    continue; 
+                }
+                /* std::cout << "\n[info] Will download '" << args["remote"] 
+                        << "' to directory '" << local_path 
+                        << "' as '" << filename << "'\n\n"; */
+
+
             } else if (CMD == "SYNC") {
                 args["src"] = toks[1]; args["dst"] = toks[2];
             } else {
@@ -428,6 +455,88 @@ int main(int argc, char* argv[]) {
                 } else {
                     std::cout << "\n[error] failed to copy from '" << args["src"].get<std::string>()
                               << "' to '" << args["dst"].get<std::string>() << "'\n"
+                              << "Reason: " << resp.value("message", "") << "\n\n";
+                }
+            } else if (CMD == "DOWNLOAD") {
+                if (resp.value("status", "ERROR") == "OK") {
+                    std::cout << "\n[ok] downloaded remote '" << args["remote"].get<std::string>()
+                              << "' to local '" << args["local"].get<std::string>() << "' as '" << args["filename"].get<std::string>() << "'\n";
+                    std::cout << "\n[info] Starting download file '" << args["remote"].get<std::string>() << "' of size " << resp.value("size", 0) << " bytes in " << resp.value("total_chunks", 0) << " chunks.\n\n";
+                            // --- 🔹 prijímanie chunkov po potvrdení OK ---
+                    int64_t file_size = resp.value("size", 0);
+                    int64_t chunk_size = resp.value("chunk_size", 0);
+                    int64_t total_chunks = resp.value("total_chunks", 0);
+
+                    std::string local_dir = args["local"].get<std::string>();
+                    std::string filename = args["filename"].get<std::string>();
+                    std::string out_path = (fs::path(local_dir) / filename).string();
+
+                    std::ofstream out(out_path, std::ios::binary);
+                    if (!out.is_open()) {
+                        std::cout << "[error] cannot open local file for writing: " << out_path << "\n";
+                        continue;
+                    }
+
+                    auto start_time = std::chrono::steady_clock::now();
+
+                    int64_t received_total = 0;
+                    for (int64_t i = 0; i < total_chunks; ++i) {
+                        nlohmann::json header;
+                        if (!recv_json(sock, header)) {
+                            std::cout << "[error] failed to receive header for chunk " << i << "\n";
+                            break;
+                        }
+
+                        int64_t chunk_index = header.value("chunk_index", 0);
+                        int64_t bytes_expected = header.value("size", 0);
+
+                        // --- čítaj presne bytes_expected bajtov ---
+                        std::vector<char> buffer(bytes_expected);
+                        asio::error_code ec;
+                        int64_t bytes_read_total = 0;
+                        while (bytes_read_total < bytes_expected) {
+                            int64_t n = sock.read_some(asio::buffer(buffer.data() + bytes_read_total,
+                                                                bytes_expected - bytes_read_total), ec);
+                            if (ec) {
+                                std::cout << "[error] socket read error during chunk " << chunk_index
+                                        << ": " << ec.message() << "\n";
+                                break;
+                            }
+                            bytes_read_total += n;
+                        }
+
+                        if (bytes_read_total != bytes_expected) {
+                            std::cout << "[warning] incomplete chunk " << chunk_index
+                                    << " (" << bytes_read_total << "/" << bytes_expected << ")\n";
+                        }
+
+                        // zapíš chunk
+                        out.write(buffer.data(), bytes_read_total);
+                        received_total += bytes_read_total;
+
+                        // potvrď chunk serveru
+                        nlohmann::json ack = {{"ack", static_cast<int32_t>(chunk_index)}, {"status", "OK"}};
+                        send_json(sock, ack);
+
+                        // priebežný výpis
+                        double progress = (file_size > 0) ? (100.0 * received_total / file_size) : 0.0;
+                        std::cout << "\r[download] chunk " << (i + 1) << "/" << total_chunks
+                                << " (" << std::fixed << std::setprecision(1) << progress << "%)" << std::flush;
+                    }
+                    auto end_time = std::chrono::steady_clock::now();
+                    std::chrono::duration<double> elapsed = end_time - start_time;
+                    double seconds = elapsed.count();
+
+                    double speed_mbps = (received_total * 8.0) / (seconds * 1024.0 * 1024.0); // v Mbit/s
+                    double speed_mb_s = (received_total / (1024.0 * 1024.0)) / seconds;       // v MB/s
+
+                    out.close();
+                    std::cout << "\n\n[ok] Download completed successfully -> " << out_path << "\n\n";
+                    std::cout << "[info] Total time: " << std::fixed << std::setprecision(2) << seconds << " s"
+                                    << " (" << speed_mb_s << " MB/s, " << speed_mbps << " Mbit/s)\n\n";
+                } else {
+                    std::cout << "\n[error] failed to download remote '" << args["remote"].get<std::string>()
+                              << "' to local '" << args["local"].get<std::string>() << "'\n"
                               << "Reason: " << resp.value("message", "") << "\n\n";
                 }
             }

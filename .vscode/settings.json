@@ -50,7 +50,8 @@
         "unordered_map": "cpp",
         "vector": "cpp",
         "regex": "cpp",
-        "unordered_set": "cpp"
+        "unordered_set": "cpp",
+        "thread": "cpp"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }
