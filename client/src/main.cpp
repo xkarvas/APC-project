@@ -230,6 +230,10 @@ int main(int argc, char* argv[]) {
 
             if (CMD == "LIST") {
                 args["path"] = (have >= 1) ? toks[1] : dir;
+
+                if (!(args["path"].get<std::string>().starts_with("/"))) {
+                    args["path"] = dir + "/" + args["path"].get<std::string>();
+                } 
             } else if (CMD == "UPLOAD") {
                 std::string local = toks[1];
                 std::string remote = (have >= 2) ? toks[2] : basename_of(local);
@@ -240,9 +244,13 @@ int main(int argc, char* argv[]) {
                 args["remote"] = remote; args["local"] = local;
             } else if (CMD == "DELETE") {
                 args["path"] = toks[1];
+                if (!(args["path"].get<std::string>().starts_with("/"))) {
+                    args["path"] = dir + "/" + args["path"].get<std::string>();
+                } 
             } else if (CMD == "CD") {
                 args["path"] = toks[1];
                 std::string newPath = args["path"].get<std::string>();
+
 
                 if (newPath == "..") {
                     dir = root;
@@ -252,22 +260,43 @@ int main(int argc, char* argv[]) {
                     std::cout << "\n[ok] stayed in directory '" << dir << "'\n\n";
                     continue;
                 }
+                if (!(args["path"].get<std::string>().starts_with("/"))) {
+                    args["path"] = dir + "/" + args["path"].get<std::string>();
+                } 
 
             } else if (CMD == "MKDIR") {
                 args["path"] = toks[1];
-
+                if (!(args["path"].get<std::string>().starts_with("/"))) {
+                    args["path"] = dir + "/" + args["path"].get<std::string>();
+                } 
 
             } else if (CMD == "RMDIR") {
                 args["path"] = toks[1];
 
-                if (!is_path_under(dir, toks[1]) || dir == toks[1]) {
-                    std::cout << "\n\n[error] cannot remove current or parent directory '" << dir << "'\n\n";
+                if (!(args["path"].get<std::string>().starts_with("/"))) {
+                    args["path"] = dir + "/" + args["path"].get<std::string>();
+                } 
+
+                if (!is_path_under(dir, args["path"].get<std::string>()) || dir == args["path"].get<std::string>()) {
+                    dir = root;
                     continue;
                 }
             } else if (CMD == "MOVE") {
                 args["src"] = toks[1]; args["dst"] = toks[2];
+                if (!(args["src"].get<std::string>().starts_with("/"))) {
+                    args["src"] = dir + "/" + args["src"].get<std::string>();
+                }
+                if (!(args["dst"].get<std::string>().starts_with("/"))) {
+                    args["dst"] = dir + "/" + args["dst"].get<std::string>();
+                }
             } else if (CMD == "COPY") {
                 args["src"] = toks[1]; args["dst"] = toks[2];
+                if (!(args["src"].get<std::string>().starts_with("/"))) {
+                    args["src"] = dir + "/" + args["src"].get<std::string>();
+                }
+                if (!(args["dst"].get<std::string>().starts_with("/"))) {
+                    args["dst"] = dir + "/" + args["dst"].get<std::string>();
+                }
             } else if (CMD == "SYNC") {
                 args["src"] = toks[1]; args["dst"] = toks[2];
             } else {
@@ -344,6 +373,7 @@ int main(int argc, char* argv[]) {
                 }
             }
             else if (CMD == "RMDIR") {
+
                 if (resp.value("status", "ERROR") == "OK") {
                     std::cout << "\n[ok] directory removed: '" << args["path"].get<std::string>() << "'\n\n";
                 } else {
