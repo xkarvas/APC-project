@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 
 
 #include <filesystem>
@@ -134,8 +135,6 @@ static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size
     return true;
 }
 
-
-
 bool is_path_under(const std::string& path1, const std::string& path2) {
     try {
         fs::path rootPath = fs::weakly_canonical(path1);
@@ -156,6 +155,28 @@ bool is_path_under(const std::string& path1, const std::string& path2) {
     catch (...) {
         return false; // ak sa niečo pokazí (napr. neexistujúca cesta)
     }
+}
+
+std::string formatSize(const std::string& sizeStr) {
+    double size = std::stod(sizeStr); // z JSONu alebo reťazca
+    const char* units[] = {"B", "kB", "MB", "GB", "TB"};
+    int unitIndex = 0;
+
+    // škáluj jednotky, kým je hodnota >= 1000
+    while (size >= 1000.0 && unitIndex < 4) {
+        size /= 1024.0;
+        unitIndex++;
+    }
+
+    // ak je príliš malé (napr. < 0.8 kB), posuň späť
+    while (size < 0.8 && unitIndex > 0) {
+        size *= 1024.0;
+        unitIndex--;
+    }
+
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << size << " " << units[unitIndex];
+    return oss.str();
 }
 
 
@@ -328,7 +349,7 @@ int main(int argc, char* argv[]) {
                             if (files.is_array()) {
                                 std::cout << std::left << std::setw(30) << "Názov"
                                         << std::setw(12) << "Typ"
-                                        << std::setw(10) << "Veľkosť (B)" << "\n";
+                                        << std::setw(20) << "Veľkosť" << "\n";
                                 std::cout << std::string(55, '-') << "\n";
 
                                 for (const auto& file : files) {
@@ -336,9 +357,12 @@ int main(int argc, char* argv[]) {
                                     std::string type = file.value("type", "");
                                     std::string size = file.value("size", "-");
 
-                                    std::cout << std::left << std::setw(30) << name
-                                            << std::setw(12) << type
-                                            << std::setw(10) << size << "\n";
+                                    std::cout << std::left
+                                            << std::setw(30) << name
+                                            << std::setw(10) << type
+                                            << std::right << std::setw(15)
+                                            << formatSize(size)
+                                            << "\n";
                                 }
                                 std::cout << std::string(55, '-') << "\n\n";
                             } else {
