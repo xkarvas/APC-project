@@ -51,8 +51,6 @@ static void send_json(tcp::socket& s, const nlohmann::json& j) {
     // std::cout << "[server] -> " << payload << "\n";
 }
 
-
-
 bool is_path_under_root(const std::string& root, const std::string& path) {
     try {
         fs::path rootPath = fs::weakly_canonical(root);
@@ -74,7 +72,6 @@ bool is_path_under_root(const std::string& root, const std::string& path) {
         return false; // ak sa niečo pokazí (napr. neexistujúca cesta)
     }
 }
-
 
 static uintmax_t directory_size(const fs::path& dir) {
     uintmax_t total = 0;
@@ -390,26 +387,85 @@ static void handle_client(tcp::socket sock) {
                 std::cout << "\n[ok] download finished successfully for " << path << " to client " << client_port << "\n";
             } else if (cmd == "UPLOAD") {
                 std::string path = args.value("remote", "");
-                std::string filename = fs::path(path).filename().string();
+                std::string filename = fs::path(args.value("local", "")).filename().string();
+                std::string path_with_filename = (fs::path(path) / filename).string();
+                // std::cout << "[info] upload -> path: " << path << ", filename: " << filename << ", path_with_filename: " << path_with_filename << "\n";
 
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","UPLOAD"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] upload -> access denied, path: " << path << ", root: " << root << "\n";
+                    std::cout << "[error] upload -> access denied, path: " << path << ", root: " << root << " local_path: " << args.value("local", "") << "\n";
                     continue;
                 }
 
                 if (fs::is_directory(path) && !fs::exists(path + "/" + filename)) {
                     send_json(sock, {{"cmd", "UPLOAD"}, {"status", "OK"}, {"message", "Ready to receive chunks"}});
+                    std::cout << "[info] upload -> ready to receive chunks for '" << path << "'\n";
                 } else {
                     send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "File already exists"}});
                     std::cout << "[error] upload -> reject upload to '" << path << "'\n";
                     continue;
-                    
                 }
-                // TODO: implement upload handling
-                continue;
 
+                if (fs::exists(path_with_filename)) {
+                    send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "File already exists"}});
+                    std::cout << "[error] upload -> file already exists at '" << path_with_filename << "'\n";
+                    continue;
+                }
 
+                recv_json(sock, req);
+                int64_t total_size = req.value("size", 0);  
+                int64_t chunk_size = req.value("chunk_size", 0);
+                int64_t total_chunks = req.value("total_chunks", 0);
+
+                
+
+                std::ofstream outfile(path_with_filename, std::ios::binary);
+                if (!outfile.is_open()) {
+                    send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "Cannot create file"}});
+                    std::cout << "[error] upload -> cannot create file at '" << path << "'\n";
+                    continue;
+                }
+                send_json(sock, {{"cmd", "UPLOAD"}, {"status", "OK"}, {"message", "Start sending chunks"}});
+                std::cout << "[server] Starting upload file '" << path_with_filename << "' of size " << total_size << " bytes in " << total_chunks << " chunks. From client port: " << client_port << "\n";
+
+                int err = 0;
+                for (size_t i = 0; i < total_chunks; ++i) {
+                    nlohmann::json chunk_header;
+                    if (!recv_json(sock, chunk_header)) {
+                        std::cout << "\n[error] " << client_port << " client disconnected during upload.\n";
+                        err = 1;
+                        break;
+                    }
+
+                    int64_t chunk_index = chunk_header.value("chunk_index", -1);
+                    int64_t chunk_size = chunk_header.value("size", 0);
+                    if (chunk_index != (int64_t)i || chunk_size <= 0) {
+                        std::cout << "[error] " << client_port << " invalid chunk header for chunk " << i << " — aborting upload.\n";
+                        err = 1;
+                        break;
+                    }
+
+                    std::vector<char> buffer(chunk_size);
+                    asio::read(sock, asio::buffer(buffer.data(), chunk_size));
+
+                    outfile.write(buffer.data(), chunk_size);
+
+                    // Posli ACK klientovi
+                    send_json(sock, {{"status", "OK"}, {"ack", static_cast<int64_t>(i)}});
+
+                    double progress = 100.0 * (double)(i + 1) / (double)total_chunks;
+                    std::cout << "\r[info] received chunk " << (i + 1) << "/" << total_chunks
+                            << " (" << std::fixed << std::setprecision(1) << progress << "%)" << std::flush;
+                }
+
+                outfile.close();
+                if (!err) {
+                    std::cout << "\n[ok] upload finished successfully for '" << path_with_filename << "' from client " << client_port << "\n";
+                } else {
+                    std::cout << "[error] upload failed for '" << path_with_filename << "' from client " << client_port << "\n";
+                    std::error_code ec;
+                    fs::remove(path_with_filename, ec);
+                }
 
             } else {
                 send_json(sock, {{"cmd", cmd}, {"status","ERROR"}, {"code",1}, {"message","Unknown command"}});
