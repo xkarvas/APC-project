@@ -371,7 +371,7 @@ int main(int argc, char* argv[]) {
             }
 
             // Odoslanie žiadosti
-            nlohmann::json req = {{"cmd", CMD}, {"args", args}, {"root", root}};
+            nlohmann::json req = {{"client_port", port},{"cmd", CMD}, {"args", args}, {"root", root}};
             send_json(sock, req);
 
             // Odpoveď - zatial 

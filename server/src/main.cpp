@@ -102,6 +102,7 @@ static void handle_client(tcp::socket sock) {
             const std::string cmd = req.value("cmd", "");
             const auto args = req.value("args", nlohmann::json::object());
             const auto root = req.value("root", "");
+            const auto client_port = req.value("client_port", "");
             // std::cout << "[server] cmd=" << cmd << " args=" << args.dump() << "\n";
 
             if (cmd == "LIST") {
@@ -109,7 +110,7 @@ static void handle_client(tcp::socket sock) {
 
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","LIST"},{"status","ERROR"},{"code",2},{"message", "Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] list -> access denied, path: " << path << ", root: " << root << "\n";
+                    std::cout << "[error] " << client_port << " list -> access denied, path: " << path << ", root: " << root << "\n";
                     continue;
                 }
 
@@ -140,19 +141,19 @@ static void handle_client(tcp::socket sock) {
                     }
 
                     send_json(sock, {{"cmd","LIST"},{"status","OK"},{"code",0},{"message","LIST command executed"},{"data", files.dump()}});
-                    std::cout << "[ok] list -> " << "path: " << path <<"\n";
+                    std::cout << "[ok] " << client_port << " list -> " << "path: " << path <<"\n";
 
                 } catch (const std::exception& e) {
                     result = std::string("Error: ") + e.what();
                     send_json(sock, {{"cmd","LIST"},{"status","ERROR"},{"code",1},{"message","LIST command failed"},{"data", result}});
-                    std::cout << "[error] list ->" << result << std::endl;
+                    std::cout << "[error] " << client_port << " list ->" << result << std::endl;
                 }               // TODO: implement LIST command
             } else if (cmd == "CD") {
                 std::string path = args.value("path", "");
 
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","CD"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] cd -> access denied, path: " << path << ", root: " << root << "\n";
+                    std::cout << "[error] " << client_port << " cd -> access denied, path: " << path << ", root: " << root << "\n";
                     continue;
                 }
 
@@ -161,96 +162,96 @@ static void handle_client(tcp::socket sock) {
                         if (std::filesystem::is_directory(path)) {
                             // Je to priečinok
                             send_json(sock, {{"cmd","CD"},{"status","OK"},{"code",0},{"path", path}});
-                            std::cout << "[ok] cd -> ok, changed to '" << path << "'" << "\n";
+                            std::cout << "[ok] " << client_port << " cd -> ok, changed to '" << path << "'" << "\n";
 
                         } else {
                             send_json(sock, {{"cmd","CD"},{"status","WARNING"},{"code",-1},{"path", path},{"message","Not a directory"}});
-                            std::cout << "[error] cd -> not a directory, path: '" << path << "'\n";
+                            std::cout << "[error] " << client_port << " cd -> not a directory, path: '" << path << "'\n";
                         }
                     } else {
                         // neexistuje
                         send_json(sock, {{"cmd","CD"},{"status","ERROR"},{"code",1},{"path", path},{"message","Directory does not exist"}});
-                        std::cout << "[error] cd -> directory does not exist, path: '" << path << "'\n";
+                        std::cout << "[error] " << client_port << " cd -> directory does not exist, path: '" << path << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","CD"},{"status","ERROR"},{"code",1},{"path", path},{"message","Unknown error"}});
-                    std::cout << "[error] cd -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << client_port << " cd -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "MKDIR") {
                 std::string path = args.value("path", "");
 
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","MKDIR"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] mkdir -> access denied, path: " << path << ", root: " << root << "\n";
+                    std::cout << "[error] " << client_port << " mkdir -> access denied, path: " << path << ", root: " << root << "\n";
                     continue;
                 }
 
                 try {
                     if (std::filesystem::exists(path)) {
                         send_json(sock, {{"cmd","MKDIR"},{"status","ERROR"},{"code",1},{"message","Directory already exists"}});
-                        std::cout << "[error] mkdir -> directory already exists, path: '" << path << "'\n";
+                        std::cout << "[error] " << client_port << " mkdir -> directory already exists, path: '" << path << "'\n";
                     } else {
                         std::filesystem::create_directories(path);
                         send_json(sock, {{"cmd","MKDIR"},{"status","OK"},{"code",0},{"message","Directory created"}});
-                        std::cout << "[ok] mkdir -> created directory at '" << path << "'\n";
+                        std::cout << "[ok] " << client_port << " mkdir -> created directory at '" << path << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","MKDIR"},{"status","ERROR"},{"code",1},{"message","Failed to create directory"}});
-                    std::cout << "[error] mkdir -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << client_port << " mkdir -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "RMDIR") {
                 std::string path = args.value("path", "");
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","RMDIR"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] rmdir -> access denied, path: " << path << ", root: " << root << "\n";
+                    std::cout << "[error] " << client_port << " rmdir -> access denied, path: " << path << ", root: " << root << "\n";
                     continue;
                 }
                 try {
                     if (std::filesystem::exists(path)) {
                         if (!std::filesystem::is_directory(path)) {
                             send_json(sock, {{"cmd","RMDIR"},{"status","ERROR"},{"code",1},{"message","Path is not a directory"}});
-                            std::cout << "[error] rmdir -> path is not a directory, path: '" << path << "'\n";
+                            std::cout << "[error] " << client_port << " rmdir -> path is not a directory, path: '" << path << "'\n";
                             continue;
                         }
                         std::filesystem::remove_all(path);
                         send_json(sock, {{"cmd","RMDIR"},{"status","OK"},{"code",0},{"message","Directory removed"}});
-                        std::cout << "[ok] rmdir -> removed directory at '" << path << "'\n";
+                        std::cout << "[ok] " << client_port << " rmdir -> removed directory at '" << path << "'\n";
                     } else {
                         send_json(sock, {{"cmd","RMDIR"},{"status","ERROR"},{"code",1},{"message","Directory does not exist"}});
-                        std::cout << "[error] rmdir -> directory does not exist, path: '" << path << "'\n";
+                        std::cout << "[error] " << client_port << " rmdir -> directory does not exist, path: '" << path << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","RMDIR"},{"status","ERROR"},{"code",1},{"message","Failed to remove directory"}});
-                    std::cout << "[error] rmdir -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << client_port << " rmdir -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "DELETE") {
                 std::string path = args.value("path", "");
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] delete -> access denied, path: " << path << ", root: " << root << "\n";
+                    std::cout << "[error] " << client_port << " delete -> access denied, path: " << path << ", root: " << root << "\n";
                     continue;
                 }
                 try {
                     if (std::filesystem::exists(path)) {
                         if (std::filesystem::is_directory(path)) {
                             send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",1},{"message","Path is directory not a file"}});
-                            std::cout << "[error] delete -> path is not a file, path: '" << path << "'\n";
+                            std::cout << "[error] " << client_port << " delete -> path is not a file, path: '" << path << "'\n";
                             continue;
                         }
                         std::filesystem::remove(path);
                         send_json(sock, {{"cmd","DELETE"},{"status","OK"},{"code",0},{"message","File deleted"}});
-                        std::cout << "[ok] delete -> removed file at '" << path << "'\n";
+                        std::cout << "[ok] " << client_port << " delete -> removed file at '" << path << "'\n";
                     } else {
                         send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",1},{"message","File does not exist"}});
-                        std::cout << "[error] delete -> file does not exist, path: '" << path << "'\n";
+                        std::cout << "[error] " << client_port << " delete -> file does not exist, path: '" << path << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",1},{"message","Failed to delete file"}});
-                    std::cout << "[error] delete -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << client_port << " delete -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "MOVE") {
                 std::string src = args.value("src", "");
@@ -258,7 +259,7 @@ static void handle_client(tcp::socket sock) {
 
                 if (!is_path_under_root(root, src) || !is_path_under_root(root, dst)) {
                     send_json(sock, {{"cmd","MOVE"},{"status","ERROR"},{"code",2},{"message","Access denied: source or destination path is outside root (" + root + ")"}});
-                    std::cout << "[error] move -> access denied, src: " << src << ", dst: " << dst << ", root: " << root << "\n";
+                    std::cout << "[error] " << client_port << " move -> access denied, src: " << src << ", dst: " << dst << ", root: " << root << "\n";
                     continue;
                 }
 
@@ -266,15 +267,15 @@ static void handle_client(tcp::socket sock) {
                     if (std::filesystem::exists(src)) {
                         std::filesystem::rename(src, dst);
                         send_json(sock, {{"cmd","MOVE"},{"status","OK"},{"code",0},{"message","Move/Rename successful"}});
-                        std::cout << "[ok] move -> moved/renamed from '" << src << "' to '" << dst << "'\n";
+                        std::cout << "[ok] " << client_port << " move -> moved/renamed from '" << src << "' to '" << dst << "'\n";
                     } else {
                         send_json(sock, {{"cmd","MOVE"},{"status","ERROR"},{"code",1},{"message","Source path does not exist"}});
-                        std::cout << "[error] move -> source path does not exist, src: '" << src << "'\n";
+                        std::cout << "[error] " << client_port << " move -> source path does not exist, src: '" << src << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","MOVE"},{"status","ERROR"},{"code",1},{"message","Failed to move/rename"}});
-                    std::cout << "[error] move -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << client_port << " move -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "COPY") {
                 std::string src = args.value("src", "");
@@ -282,14 +283,14 @@ static void handle_client(tcp::socket sock) {
 
                 if (!is_path_under_root(root, src) || !is_path_under_root(root, dst)) {
                     send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",2},{"message","Access denied: source or destination path is outside root (" + root + ")"}});
-                    std::cout << "[error] copy -> access denied, src: " << src << ", dst: " << dst << ", root: " << root << "\n";
+                    std::cout << "[error] " << client_port << " copy -> access denied, src: " << src << ", dst: " << dst << ", root: " << root << "\n";
                     continue;
                 }
 
                 try {
                     if (!fs::exists(src)) {
                         send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",1},{"message","Source does not exist"},{"data", ""}});
-                        std::cout << "[error] copy -> source does not exist: '" << src << "'\n";
+                        std::cout << "[error] " << client_port << " copy -> source does not exist: '" << src << "'\n";
                         continue;
                     }
 
@@ -300,7 +301,7 @@ static void handle_client(tcp::socket sock) {
                     if (dstPath.string().find(srcPath.string()) == 0) {
                         send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",3},
                                         {"message","Destination is inside source directory (would cause infinite recursion)"},{"data", ""}});
-                        std::cout << "[error] copy -> destination is inside source directory\n";
+                        std::cout << "[error] " << client_port << " copy -> destination is inside source directory\n";
                         continue;
                     }
                     if (std::filesystem::exists(src)) {
@@ -310,15 +311,15 @@ static void handle_client(tcp::socket sock) {
                             std::filesystem::copy_file(src, dst);
                         }
                         send_json(sock, {{"cmd","COPY"},{"status","OK"},{"code",0},{"message","Copy successful"}});
-                        std::cout << "[ok] copy -> copied from '" << src << "' to '" << dst << "'\n";
+                        std::cout << "[ok] " << client_port << " copy -> copied from '" << src << "' to '" << dst << "'\n";
                     } else {
                         send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",1},{"message","Source path does not exist"}});
-                        std::cout << "[error] copy -> source path does not exist, src: '" << src << "'\n";
+                        std::cout << "[error] " << client_port << " copy -> source path does not exist, src: '" << src << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",1},{"message","Failed to copy"}});
-                    std::cout << "[error] copy -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << client_port << " copy -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "DOWNLOAD") {
                 std::string path = args.value("remote", "");
@@ -338,7 +339,7 @@ static void handle_client(tcp::socket sock) {
                 int64_t file_size = std::filesystem::file_size(path);
                 int64_t total_chunks = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-                std::cout << "[server] Starting download file '" << path << "' of size " << file_size << " bytes in " << total_chunks << " chunks.\n";   
+                std::cout << "[server] Starting download file '" << path << "' of size " << file_size << " bytes in " << total_chunks << " chunks. From client port: " << client_port << "\n";
                 send_json(sock, {
                     {"cmd", "DOWNLOAD"},
                     {"status", "OK"},
@@ -366,12 +367,12 @@ static void handle_client(tcp::socket sock) {
                     // Čakaj na potvrdenie od klienta
                     nlohmann::json ack;
                     if (!recv_json(sock, ack)) {
-                        std::cout << "[error] client disconnected during download.\n";
+                        std::cout << "[error] " << client_port << " client disconnected during download.\n";
                         break;
                     }
 
                     if (ack.value("status", "") != "OK" || ack.value("ack", -1) != (int)i) {
-                        std::cout << "[error] invalid ACK for chunk " << i << " — aborting download.\n";
+                        std::cout << "[error] " << client_port << " invalid ACK for chunk " << i << " — aborting download.\n";
                         break;
                     }
 
@@ -386,7 +387,7 @@ static void handle_client(tcp::socket sock) {
                 
 
                 file.close();
-                std::cout << "\n[ok] download finished successfully for " << path << "\n";
+                std::cout << "\n[ok] download finished successfully for " << path << " to client " << client_port << "\n";
             } else if (cmd == "UPLOAD") {
                 std::string path = args.value("remote", "");
                 std::string filename = fs::path(path).filename().string();
