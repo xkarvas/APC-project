@@ -227,7 +227,6 @@ int main(int argc, char* argv[]) {
         nlohmann::json auth;
         auth["cmd"] = "AUTH";
         auth["username"] = user;
-        auth["password"] = "nopass"; // public mode
         send_json(sock, auth);
 
         recv_json(sock, auth);
@@ -235,16 +234,30 @@ int main(int argc, char* argv[]) {
             std::cerr << "[client] authentication failed: " << auth.value("message", "unknown error") << "\n";
             return 1;
         }
+
+        if (auth.value("mode", "") == "public") {
+            std::cout 
+                << "===============================================\n"
+                << "  MiniDrive Client — connected to " << host << ":" << port << "\n"
+                << "===============================================\n";
+            std::cout << "[client] connected to " << host << ":" << port << "\n";
+            std::cout << "[warning] operating in public mode - files are visible to everyone\n";
+            std::cout << "===============================================\n\n";
+        } else {
+
+            if (auth.value("next","") == "LOGIN") {
+                std::cout << "Private mode. Welcome, " << user << "! next login\n\n";
+            } else {
+                std::cout << "Private mode. Welcome, " << user << "! next register\n\n";
+            }
+            
+
+
+            return 1;
+        }
+
         std::string root = auth.value("root", "/");
         std::string dir = root;
-
-        std::cout 
-              << "===============================================\n"
-              << "  MiniDrive Client — connected to " << host << ":" << port << "\n"
-              << "===============================================\n";
-        std::cout << "[client] connected to " << host << ":" << port << "\n";
-        std::cout << "[warning] operating in public mode - files are visible to everyone\n";
-        std::cout << "===============================================\n\n";
 
 
         std::string line;
