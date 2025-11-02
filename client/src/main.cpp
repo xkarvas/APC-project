@@ -11,6 +11,7 @@
 #include <cstring>
 #include <cmath>
 #include <fstream>
+#include <regex>
 
 
 #include <filesystem>
@@ -180,21 +181,40 @@ std::string formatSize(const std::string& sizeStr) {
     return oss.str();
 }
 
+std::pair<std::string,std::string> splitUserIp(const std::string& s) {
+    // nájdi IPv4 na KONCI reťazca
+    static const std::regex ipAtEnd(R"(((?:\d{1,3}\.){3}\d{1,3})$)");
+    std::smatch m;
+    if (!std::regex_search(s, m, ipAtEnd)) return {"", ""}; // nenašlo IP
+
+    std::string ip = m[1].str();
+    std::string user = s.substr(0, m.position()); // všetko pred IP
+
+    // voliteľne: over rozsah oktetov 0..255
+    auto ok = [&]{
+        int a,b,c,d;
+        return std::sscanf(ip.c_str(), "%d.%d.%d.%d", &a,&b,&c,&d)==4
+            && (0<=a&&a<=255)&&(0<=b&&b<=255)&&(0<=c&&c<=255)&&(0<=d&&d<=255);
+    }();
+    if (!ok) return {"",""};
+
+    return {user, ip};
+}
 
 int main(int argc, char* argv[]) {
-    std::string host = "127.0.0.1";
-    std::string port = "5050";
-    if (argc >= 2) {
-        std::string ep = argv[1]; // "host:port"
-        auto pos = ep.rfind(':');
-        if (pos == std::string::npos) { std::cerr << "Usage: client <host:port>\n"; return 1; }
-        host = ep.substr(0, pos);
-        port = ep.substr(pos + 1);
-    }
+    if (argc < 2) { std::cerr << "Wrong arguments\n"; return 1; }
+    
+    std::string ep = argv[1]; 
+    auto pos = ep.rfind(':');
+    if (pos == std::string::npos) { std::cerr << "Usage: [error] client <host:port>\n"; return 1; }
+    std::string host_ip = ep.substr(0, pos);
+    std::string port = ep.substr(pos + 1);
+    
 
+    auto [user, host] = splitUserIp(host_ip);
 
-    std::string root = "/Users/ervinkarvas/data/root";  // neskor bude argv[2] -- potrebne potom overit cestu pri prihlaseni
-    std::string dir = root;
+    std::cout << "User: " << user << ", Host: " << host << "\n";
+
 
     try {
         asio::io_context io;
@@ -211,6 +231,12 @@ int main(int argc, char* argv[]) {
         std::cout << "[client] connected to " << host << ":" << port << "\n";
         std::cout << "[warning] operating in public mode - files are visible to everyone\n";
         std::cout << "===============================================\n\n";
+
+        nlohmann::json welcome;
+        recv_json(sock, welcome);
+
+        std::string root = welcome.value("root", "/");
+        std::string dir = root;
 
         std::string line;
         while (true) {

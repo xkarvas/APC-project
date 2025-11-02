@@ -28,6 +28,15 @@ static inline uint32_t read_u32_be(const unsigned char in[4]) {
     return (uint32_t(in[0]) << 24) | (uint32_t(in[1]) << 16) | (uint32_t(in[2]) << 8) | uint32_t(in[3]);
 }
 
+static std::string trimQuotes(std::string s) {
+    auto q = [](char c){ return c=='\'' || c=='"'; };
+    if (!s.empty() && q(s.front())) s.erase(s.begin());
+    if (!s.empty() && q(s.back()))  s.pop_back(); // zvládne aj ./data'
+    return s;
+}
+
+
+
 // --- blocking I/O ---
 static bool recv_json(tcp::socket& s, nlohmann::json& out) {
     unsigned char hdr[4];
@@ -89,9 +98,10 @@ static uintmax_t directory_size(const fs::path& dir) {
     return total;
 }
 
-static void handle_client(tcp::socket sock) {
+static void handle_client(tcp::socket sock, const fs::path& root) {
     try {
         std::cout << "[server] client connected from " << sock.remote_endpoint() << "\n";
+        send_json(sock, {{"cmd","WELCOME"},{"message","Welcome to the file server"},{"root",root.string()}});
         while (true) {
             nlohmann::json req;
             if (!recv_json(sock, req)) break;
@@ -480,21 +490,77 @@ static void handle_client(tcp::socket sock) {
 
 int main(int argc, char* argv[]) {
     int port = 5050;
-    // mini-args: ./server --port 5050
-    for (int i = 1; i + 1 < argc; ++i) {
-        std::string k = argv[i], v = argv[i+1];
-        if (k == "--port") port = std::stoi(v);
+    fs::path root = ".";
+
+    for (int i = 1; i < argc; ) {
+        std::string arg = argv[i];
+
+        if (arg.rfind("--", 0) != 0) {
+            std::cerr << "Unexpected positional argument: " << arg << "\n";
+            return 2;
+        }
+
+        std::string key, val;
+        if (auto eq = arg.find('='); eq != std::string::npos) {
+            key = arg.substr(2, eq - 2);
+            val = arg.substr(eq + 1);
+            ++i; // spotrebovali sme iba jeden argv
+        } else {
+            key = arg.substr(2);
+            if (i + 1 >= argc) {
+                std::cerr << "Missing value for --" << key << "\n";
+                return 2;
+            }
+            val = argv[i + 1];
+            i += 2; // preskoč aj hodnotu
+        }
+
+        val = trimQuotes(val);
+
+        if (key == "port") {
+            try {
+                int p = std::stoi(val);
+                if (p < 1 || p > 65535) throw std::out_of_range("port");
+                port = p;
+            } catch (...) {
+                std::cerr << "Invalid --port: " << val << " (expected 1..65535)\n";
+                return 2;
+            }
+        } else if (key == "root") {
+            if (val.empty()) {
+                std::cerr << "Invalid --root: empty path\n";
+                return 2;
+            }
+            root = val; // string/path, nie stoi!
+        } else {
+            std::cerr << "Unknown option: --" << key << "\n";
+            return 2;
+        }
     }
+
+    try {
+        if (!fs::exists(root)) fs::create_directories(root);
+        root = fs::weakly_canonical(root);
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to prepare root directory: " << e.what() << "\n";
+        return 2;
+    }
+
+    // 4) Spustenie servera
+    std::cout << "[server] starting...\n";
+
+
+    std::cout << "[server] listening on 0.0.0.0:" << port
+              << ", root: " << root.string() << "\n";
 
     try {
         asio::io_context io;
         tcp::acceptor acc(io, tcp::endpoint(tcp::v4(), (unsigned short)port)); // 0.0.0.0:<port>
-        std::cout << "[server] listening on 0.0.0.0:" << port << "\n";
 
         while (true) {
             tcp::socket sock(io);
             acc.accept(sock);                             // blokujúci accept
-            std::thread(handle_client, std::move(sock)).detach(); // vlákno na klienta
+            std::thread(handle_client, std::move(sock), root).detach(); // vlákno na klienta
         }
     } catch (const std::exception& e) {
         std::cerr << "[server] fatal: " << e.what() << "\n";
