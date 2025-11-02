@@ -213,7 +213,7 @@ int main(int argc, char* argv[]) {
 
     auto [user, host] = splitUserIp(host_ip);
 
-    std::cout << "User: " << user << ", Host: " << host << "\n";
+    //std::cout << "User: " << user << ", Host: " << host << "\n";
 
 
     try {
@@ -224,6 +224,20 @@ int main(int argc, char* argv[]) {
         asio::connect(sock, eps);
 
 
+        nlohmann::json auth;
+        auth["cmd"] = "AUTH";
+        auth["username"] = user;
+        auth["password"] = "nopass"; // public mode
+        send_json(sock, auth);
+
+        recv_json(sock, auth);
+        if (auth.value("status", "ERROR") != "OK") {
+            std::cerr << "[client] authentication failed: " << auth.value("message", "unknown error") << "\n";
+            return 1;
+        }
+        std::string root = auth.value("root", "/");
+        std::string dir = root;
+
         std::cout 
               << "===============================================\n"
               << "  MiniDrive Client — connected to " << host << ":" << port << "\n"
@@ -232,11 +246,6 @@ int main(int argc, char* argv[]) {
         std::cout << "[warning] operating in public mode - files are visible to everyone\n";
         std::cout << "===============================================\n\n";
 
-        nlohmann::json welcome;
-        recv_json(sock, welcome);
-
-        std::string root = welcome.value("root", "/");
-        std::string dir = root;
 
         std::string line;
         while (true) {

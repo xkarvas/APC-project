@@ -100,8 +100,29 @@ static uintmax_t directory_size(const fs::path& dir) {
 
 static void handle_client(tcp::socket sock, const fs::path& root) {
     try {
-        std::cout << "[server] client connected from " << sock.remote_endpoint() << "\n";
-        send_json(sock, {{"cmd","WELCOME"},{"message","Welcome to the file server"},{"root",root.string()}});
+        // authentication phase
+        nlohmann::json auth;
+        if (!recv_json(sock, auth)) {
+            std::cerr << "[error] " << sock.remote_endpoint() << " auth failed\n";
+            return;
+        }
+        if (auth.value("cmd", "") != "AUTH") {
+            std::cerr << "[error] " << sock.remote_endpoint() << " auth failed: invalid command\n";
+            return;
+        } else {
+            std::string username = auth.value("username", "");
+            std::string password = auth.value("password", "");
+            // for simplicity, accept any username/password or empty for public mode
+            if (password == "nopass") {
+                send_json(sock, {{"cmd","AUTH"},{"status","OK"},{"code",0},{"message","Authentication successful"},{"data","Welcome " + username},{"root",root.string()}});
+                std::cout << "[info] " << sock.remote_endpoint() << " connect in public mode\n";
+            } else {
+                send_json(sock, {{"cmd","AUTH"},{"status","ERROR"},{"code",1},{"message","Authentication failed"},{"data","Password required"}});
+                std::cerr << "[error] " << sock.remote_endpoint() << " auth failed: password required\n";
+                return;
+            }
+        }
+
         while (true) {
             nlohmann::json req;
             if (!recv_json(sock, req)) break;
