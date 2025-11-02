@@ -12,6 +12,9 @@
 #include <cmath>
 #include <fstream>
 #include <regex>
+#include <sodium.h>
+
+
 
 
 #include <filesystem>
@@ -66,6 +69,44 @@ static std::string to_upper(std::string s) {
 static std::string basename_of(const std::string& p) {
     auto pos = p.find_last_of("/\\");
     return (pos == std::string::npos) ? p : p.substr(pos+1);
+}
+
+
+template <size_t N>
+std::array<unsigned char, N> b64url_to_array(const std::string& b64) {
+    std::array<unsigned char, N> out{};
+    size_t outlen = 0;
+    if (sodium_base642bin(out.data(), out.size(),
+                          b64.c_str(), b64.size(),
+                          nullptr, &outlen, nullptr,
+                          sodium_base64_VARIANT_URLSAFE_NO_PADDING) != 0
+        || outlen != N) {
+        throw std::runtime_error("invalid b64 salt or wrong length");
+    }
+    return out;
+}
+// hashing with salt
+static std::string argon2id_hex(const std::string& password,
+                                const unsigned char salt[crypto_pwhash_SALTBYTES]) {
+    unsigned char out[32];
+    if (crypto_pwhash(out, sizeof out,
+                      password.c_str(), password.size(),
+                      salt,
+                      crypto_pwhash_OPSLIMIT_MODERATE,
+                      crypto_pwhash_MEMLIMIT_MODERATE,
+                      crypto_pwhash_ALG_ARGON2ID13) != 0) {
+        throw std::runtime_error("Argon2id failed");
+    }
+    char hex[sizeof(out) * 2 + 1];
+    sodium_bin2hex(hex, sizeof hex, out, sizeof out);
+    sodium_memzero(out, sizeof out);
+    return std::string(hex);
+}
+
+static std::string argon2id_hex_b64salt(const std::string& password,
+                                        const std::string& salt_b64) {
+    auto salt = b64url_to_array<crypto_pwhash_SALTBYTES>(salt_b64);
+    return argon2id_hex(password, salt.data());
 }
 
 
@@ -223,6 +264,11 @@ int main(int argc, char* argv[]) {
         tcp::socket sock(io);
         asio::connect(sock, eps);
 
+        if (sodium_init() < 0) {
+            std::cerr << "[client] sodium_init failed\n";
+            return 1;
+        }
+
 
         nlohmann::json auth;
         auth["cmd"] = "AUTH";
@@ -247,14 +293,81 @@ int main(int argc, char* argv[]) {
 
             if (auth.value("next","") == "LOGIN") {
                 std::cout << "Private mode. Welcome, " << user << "! next login\n\n";
+
+                std::string pw;
+                std::cout << "Your password: " << std::flush;
+                std::system("stty -echo");
+                std::getline(std::cin, pw);
+                std::system("stty echo");
+                std::cout << "\n\n";
+
+                std::string pw_hash = argon2id_hex_b64salt(pw, auth.value("salt",""));
+                std::cout << "PW_hash: " << pw_hash << "\nSalt"<< auth.value("salt","") <<"\n";
+
+                nlohmann::json login = {
+                    {"cmd","LOGIN"},
+                    {"username", user},
+                    {"password", pw_hash}
+                };
+                send_json(sock, login);
+
+                recv_json(sock, auth);
+                if (auth.value("status","") != "OK") {
+                    std::cerr << "[client] authentication failed: " << auth.value("message", "unknown error") << "\n";
+                    return 1;
+                }
+
+                std::cout 
+                    << "===============================================\n"
+                    << "  MiniDrive Client — connected to " << host << ":" << port << "\n"
+                    << "===============================================\n";
+                std::cout << "             Welcome " << user << "!\n";
+                std::cout << "      You are in your private repositary\n";
+                std::cout << "===============================================\n\n";
+                
+
+
+
+
+
             } else {
                 std::cout << "Private mode. Welcome, " << user << "! next register\n\n";
+                
+                std::string pw;
+                std::cout << "Your new password: " << std::flush;
+                std::system("stty -echo");
+                std::getline(std::cin, pw);
+                std::system("stty echo");
+                std::cout << "\n\n";
+
+                std::string pw_hash = argon2id_hex_b64salt(pw, auth.value("salt",""));
+                //std::cout << "PW_hash: " << pw_hash << "\nSalt: " << auth.value("salt","") << "\n\n";
+
+                nlohmann::json reg = {
+                    {"cmd","REGISTER"},
+                    {"username", user},
+                    {"password", pw_hash}
+                };
+                send_json(sock, reg);
+
+                recv_json(sock, auth);
+                if (auth.value("status","") != "OK") {
+                    std::cerr << "[client] authentication failed: " << auth.value("message", "unknown error") << "\n";
+                    return 1;
+                }
+
+                std::cout 
+                    << "===============================================\n"
+                    << "  MiniDrive Client — connected to " << host << ":" << port << "\n"
+                    << "===============================================\n";
+                std::cout << "             Welcome " << user << "!\n";
+                std::cout << "      You are in your private repositary\n";
+                std::cout << "===============================================\n\n";
+
+
             }
-            
-
-
-            return 1;
         }
+
 
         std::string root = auth.value("root", "/");
         std::string dir = root;

@@ -5,17 +5,64 @@
 
 #include <iostream>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <sodium.h>
+#include <chrono>
+#include <iomanip>
+#include <sstream>
 
 
 #include <filesystem>
 namespace fs = std::filesystem;
 
 using asio::ip::tcp;
+
+
+static std::vector<unsigned char> hex_to_vec(const std::string& hex) {
+    std::vector<unsigned char> out(hex.size() / 2);
+    size_t outlen = 0;
+    if (sodium_hex2bin(out.data(), out.size(),
+                       hex.c_str(), hex.size(),
+                       nullptr, &outlen, nullptr) != 0) {
+        throw std::runtime_error("invalid hex");
+    }
+    out.resize(outlen);
+    return out;
+}
+
+// constant-time porovnanie dvoch HEX reťazcov
+static bool ct_equal_hex(const std::string& a_hex, const std::string& b_hex) {
+    auto a = hex_to_vec(a_hex);
+    auto b = hex_to_vec(b_hex);
+    if (a.size() != b.size()) return false;
+    int rc = sodium_memcmp(a.data(), b.data(), a.size());
+    // (voliteľne) vynuluj dočasné buffre:
+    sodium_memzero(a.data(), a.size());
+    sodium_memzero(b.data(), b.size());
+    return rc == 0;
+}
+
+
+
+inline std::string iso_now_utc() {
+    using namespace std::chrono;
+    auto t = system_clock::to_time_t(system_clock::now());
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &t);
+#else
+    gmtime_r(&t, &tm);
+#endif
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%FT%TZ");
+    return oss.str();
+}
+
 
 // --- big-endian helpers (bez arpa/inet) ---
 static inline void write_u32_be(uint32_t v, unsigned char out[4]) {
@@ -120,7 +167,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                 std::error_code ec;
                 fs::create_directories("./server/users", ec);
                 if (ec) {
-                    std::cerr << "create_directories error: " << ec.message() << "\n";
+                    std::cerr << "[error] create_directories error: " << ec.message() << "\n";
                     send_json(sock, {{"cmd","AUTH"},{"status","ERROR"},{"code",1}});
                 }
 
@@ -152,14 +199,100 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
 
                 if (db["users"].contains(username)) {
-                    std::cout << "[auth] User '" << username << "' exists\n";
-                    send_json(sock, {{"cmd","AUTH"},{"status","OK"},{"code",0},{"next","LOGIN"}});
-                } else {
-                    std::cout << "[auth] User '" << username << "' NOT found... register\n";
-                    send_json(sock, {{"cmd","AUTH"},{"status","OK"},{"code",0},{"next","REGISTER"}});
-                }
+                    //std::cout << "[auth] User '" << username << "' exists\n";
+                    send_json(sock, {{"cmd","AUTH"},{"status","OK"},{"code",0},{"next","LOGIN"},{"salt",db["users"][username]["salt"]}});
 
-                // pride kontrola ci je user v databaze
+                    if (!recv_json(sock, auth)) {
+                        std::cerr << "[error] " << sock.remote_endpoint() << " auth failed\n";
+                        return;
+                    }
+                    if (auth.value("cmd", "") != "LOGIN") {
+                        std::cerr << "[error] " << sock.remote_endpoint() << " auth failed\n";
+                        return;
+                    }
+
+
+                    auto& userrec = db["users"][username];
+
+                    std::string submitted_hex = auth.value("password", "");            // to, čo poslal klient (HEX)
+                    std::string stored_hex    = userrec.value("password_hash", "");    // to, čo máš v DB (HEX)
+
+
+                    if (!submitted_hex.empty() && !stored_hex.empty()
+                            && ct_equal_hex(submitted_hex, stored_hex)) {
+                        userrec["last_login_at"] = iso_now_utc();
+
+                        {
+                            std::ofstream out(p, std::ios::trunc);
+                            out << db.dump(2);
+                        }
+
+                        send_json(sock, {
+                            {"cmd","LOGIN"},{"status","OK"},{"code",0},
+                            {"message","Welcome!"},
+                            {"root", root}
+                        });
+                        std::cout << "[auth] User " << username << " was successfully logged in!\n";
+                    } else {
+                        send_json(sock, {
+                            {"cmd","LOGIN"},{"status","ERROR"},{"code",1},
+                            {"message","Bad credentials"}
+                        });
+                        std::cerr << "[error] " << sock.remote_endpoint()
+                                << " auth failed - Bad credentials.\n";
+                    }
+                } else {
+
+                    unsigned char salt_raw[crypto_pwhash_SALTBYTES];
+                    randombytes_buf(salt_raw, sizeof salt_raw);
+                    char salt_b64[64]; 
+                    sodium_bin2base64(salt_b64, sizeof salt_b64,
+                                    salt_raw, sizeof salt_raw,
+                                    sodium_base64_VARIANT_URLSAFE_NO_PADDING);
+                    std::string salt_b64_str = salt_b64;
+
+
+
+                    //std::cout << "[auth] User '" << username << "' NOT found... register\n";
+                    send_json(sock, {{"cmd","AUTH"},{"status","OK"},{"code",0},{"next","REGISTER"},{"salt",salt_b64_str}});
+
+                    if (!recv_json(sock, auth)) {
+                        std::cerr << "[error] " << sock.remote_endpoint() << " auth failed\n";
+                        return;
+                    }
+
+                    if (auth.value("cmd", "") != "REGISTER") {
+                        std::cerr << "[error] " << sock.remote_endpoint() << " auth failed\n";
+                        return;
+                    }
+
+                    std::string password_hash = auth.value("password", "");   // alebo "verifier", ak to tak voláš
+                    if (password_hash.empty()) {
+                        send_json(sock, {{"cmd","REGISTER"},{"status","ERROR"},{"code",2},{"message","missing password hash"}});
+                        return;
+                    }
+
+                    nlohmann::json userrec = {
+                        {"user", username},
+                        {"password_hash", password_hash}, // klient posiela HEX alebo Base64 – ulož presne to, čo príde
+                        {"salt", salt_b64_str},           // tvoje Base64 URL-safe (bez '=')
+                        {"registered_at", iso_now_utc()},
+                        {"last_login_at", iso_now_utc()}
+                    };
+
+                    db["users"][username] = std::move(userrec);
+
+
+                    {
+                        std::ofstream out(p, std::ios::trunc);
+                        out << db.dump(2);
+                    }
+
+                    std::cout << "[auth] User " << username << " was succesfully registered!\n";
+
+                    send_json(sock, {{"cmd","REGISTER"},{"status","OK"},{"code",0},{"message","Registered"},{"root",root}});
+                }
+                // TO DO: Presmerovanie roota na private repozitar
             }
         }
 
@@ -554,6 +687,11 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 int main(int argc, char* argv[]) {
     int port = 5050;
     fs::path root = ".";
+
+    if (sodium_init() < 0) {
+        std::cerr << "[server] sodium_init failed\n";
+        return 1;
+    }
 
     for (int i = 1; i < argc; ) {
         std::string arg = argv[i];
