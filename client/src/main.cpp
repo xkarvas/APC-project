@@ -292,7 +292,7 @@ int main(int argc, char* argv[]) {
         } else {
 
             if (auth.value("next","") == "LOGIN") {
-                std::cout << "Private mode. Welcome, " << user << "! next login\n\n";
+                std::cout << "Private mode. Login.\n\n";
 
                 std::string pw;
                 std::cout << "Your password: " << std::flush;
@@ -302,7 +302,7 @@ int main(int argc, char* argv[]) {
                 std::cout << "\n\n";
 
                 std::string pw_hash = argon2id_hex_b64salt(pw, auth.value("salt",""));
-                std::cout << "PW_hash: " << pw_hash << "\nSalt"<< auth.value("salt","") <<"\n";
+                // std::cout << "PW_hash: " << pw_hash << "\nSalt"<< auth.value("salt","") <<"\n";
 
                 nlohmann::json login = {
                     {"cmd","LOGIN"},
@@ -324,6 +324,8 @@ int main(int argc, char* argv[]) {
                 std::cout << "             Welcome " << user << "!\n";
                 std::cout << "      You are in your private repositary\n";
                 std::cout << "===============================================\n\n";
+
+
                 
 
 
@@ -331,7 +333,7 @@ int main(int argc, char* argv[]) {
 
 
             } else {
-                std::cout << "Private mode. Welcome, " << user << "! next register\n\n";
+                std::cout << "Private mode. Registration.\n\n";
                 
                 std::string pw;
                 std::cout << "Your new password: " << std::flush;

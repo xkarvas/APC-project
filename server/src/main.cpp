@@ -48,6 +48,35 @@ static bool ct_equal_hex(const std::string& a_hex, const std::string& b_hex) {
 }
 
 
+std::string prepare_user_root(const std::string& root, const std::string& user) {
+    fs::path base_root = root;
+    fs::path users_dir = base_root / ".users";
+    fs::path user_dir  = users_dir / user;
+
+    std::error_code ec;
+
+    // vytvor root (ak ešte neexistuje)
+    fs::create_directories(base_root, ec);
+
+    // vytvor ./root/users
+    ec.clear();
+    fs::create_directories(users_dir, ec);
+
+    // vytvor ./root/users/<user>
+    ec.clear();
+    fs::create_directories(user_dir, ec);
+
+    // vráť kanonickú (alebo aspoň normálnu) cestu ako string
+    std::error_code ec2;
+    fs::path canon = fs::weakly_canonical(user_dir, ec2);
+    if (ec2) {
+        // ak zlyhá canonicalizácia, vráť aspoň "raw" cestu
+        return user_dir.string();
+    }
+    return canon.string();
+}
+
+
 
 inline std::string iso_now_utc() {
     using namespace std::chrono;
@@ -109,23 +138,49 @@ static void send_json(tcp::socket& s, const nlohmann::json& j) {
 
 bool is_path_under_root(const std::string& root, const std::string& path) {
     try {
-        fs::path rootPath = fs::weakly_canonical(root);
+        fs::path rootPath   = fs::weakly_canonical(root);
         fs::path targetPath = fs::weakly_canonical(path);
 
-        // over, či začiatok targetPath == rootPath
-        auto rootIt = rootPath.begin();
-        auto pathIt = targetPath.begin();
+        // pomocná funkcia: či prefixPath je prefixom fullPath (na úrovni path komponentov)
+        auto isPrefix = [](const fs::path& prefixPath, const fs::path& fullPath) {
+            auto pit = prefixPath.begin();
+            auto fit = fullPath.begin();
+            for (; pit != prefixPath.end() && fit != fullPath.end(); ++pit, ++fit) {
+                if (*pit != *fit)
+                    return false;
+            }
+            return std::distance(prefixPath.begin(), prefixPath.end()) <=
+                   std::distance(fullPath.begin(), fullPath.end());
+        };
 
-        for (; rootIt != rootPath.end() && pathIt != targetPath.end(); ++rootIt, ++pathIt) {
-            if (*rootIt != *pathIt)
-                return false;
+        // 1) základná podmienka: path musí byť pod rootom (alebo rovná rootu)
+        if (!isPrefix(rootPath, targetPath)) {
+            return false;
         }
 
-        // Ak sme prešli celý rootPath bez rozdielu, path je pod rootom alebo rovná
-        return std::distance(rootPath.begin(), rootPath.end()) <= std::distance(targetPath.begin(), targetPath.end());
+        // 2) zisti, či root už je niekde v .users (private mód)
+        bool rootInsideUsers = false;
+        for (auto it = rootPath.begin(); it != rootPath.end(); ++it) {
+            if (it->filename() == ".users") {
+                rootInsideUsers = true;
+                break;
+            }
+        }
+
+        // 3) ak root NIE JE v .users (public mód), zakáž prístup do root/.users/**
+        if (!rootInsideUsers) {
+            fs::path usersRoot = rootPath / ".users";
+            if (isPrefix(usersRoot, targetPath)) {
+                // pokus ísť do .users alebo niečoho pod ním -> zakáž
+                return false;
+            }
+        }
+
+        // všetko OK
+        return true;
     }
     catch (...) {
-        return false; // ak sa niečo pokazí (napr. neexistujúca cesta)
+        return false; // ak sa niečo pokazí (napr. neexistuje cesta)
     }
 }
 
@@ -227,12 +282,17 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                             out << db.dump(2);
                         }
 
+                        fs::path base_root = root; 
+                        std::string user_root_str = prepare_user_root(base_root.string(), username);
+
+
+                        std::cout << "[auth] User " << username << " was successfully logged in!\n";
+
                         send_json(sock, {
                             {"cmd","LOGIN"},{"status","OK"},{"code",0},
                             {"message","Welcome!"},
-                            {"root", root}
+                            {"root", user_root_str}
                         });
-                        std::cout << "[auth] User " << username << " was successfully logged in!\n";
                     } else {
                         send_json(sock, {
                             {"cmd","LOGIN"},{"status","ERROR"},{"code",1},
@@ -290,7 +350,11 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
                     std::cout << "[auth] User " << username << " was succesfully registered!\n";
 
-                    send_json(sock, {{"cmd","REGISTER"},{"status","OK"},{"code",0},{"message","Registered"},{"root",root}});
+                    fs::path base_root = root; 
+                    std::string user_root_str = prepare_user_root(base_root.string(), username);
+
+
+                    send_json(sock, {{"cmd","REGISTER"},{"status","OK"},{"code",0},{"message","Registered"},{"root",user_root_str}});
                 }
                 // TO DO: Presmerovanie roota na private repozitar
             }

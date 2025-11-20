@@ -1,18 +1,18 @@
 {
   "users": {
-    "ervin": {
-      "last_login_at": "2025-11-02T18:19:48Z",
-      "password_hash": "ec4099f6c9e7726439540e4c3f65b851c8bd3308f7544dce62a9ae94fbe85fc4",
-      "registered_at": "2025-11-02T18:19:48Z",
-      "salt": "hxD3QVDieejhm5uZEMjPDg",
-      "user": "ervin"
+    "e": {
+      "last_login_at": "2025-11-20T17:58:35Z",
+      "password_hash": "53eb36b6923da13cbc4ca2894bb632f677eb8e0d65ca031190e2e301482d5e89",
+      "registered_at": "2025-11-20T17:54:05Z",
+      "salt": "AtSgJxTFOLJdc9STYFNsQQ",
+      "user": "e"
     },
-    "ervin1": {
-      "last_login_at": "2025-11-02T18:20:21Z",
-      "password_hash": "5a8aed8fe786bd9103877649e755f91d790a99bb808f8782ad7a4a30907a203f",
-      "registered_at": "2025-11-02T18:20:12Z",
-      "salt": "O_ku2zhpiT8E-EmDzVBIIQ",
-      "user": "ervin1"
+    "ervin": {
+      "last_login_at": "2025-11-20T17:55:41Z",
+      "password_hash": "d5bee630818c65fde0f4b3248064e00ddcf9f41cf6c22be06e9dde56091907c6",
+      "registered_at": "2025-11-20T17:47:21Z",
+      "salt": "h7QsG2cpLbhrcouQ1zYw4g",
+      "user": "ervin"
     }
   }
 }
