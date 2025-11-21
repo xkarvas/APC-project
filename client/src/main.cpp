@@ -1001,8 +1001,14 @@ int main(int argc, char* argv[]) {
                             << resp.value("message", "unknown error") << "\n";
                     continue;
                 }
+                auto sync_start = std::chrono::steady_clock::now();
                 fs::path local_path = args["local"].get<std::string>();
                 std::string server_path = args["remote"].get<std::string>();
+
+                int deleted_files_count = 0;
+                int deleted_dirs_count  = 0;
+                int created_dirs_count  = 0;
+                int uploaded_files_count = 0;
 
                 auto entries_json = resp.value("entries", nlohmann::json::array());
 
@@ -1038,6 +1044,7 @@ int main(int argc, char* argv[]) {
                 };
 
                 std::vector<Op> ops;
+                std::vector<std::string> skipped_files;
 
                 for (const auto& [rel, r] : remote_index) {
                     if (!local_index.count(rel)) {
@@ -1049,31 +1056,60 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
+                // 4b) vytvorenie adresárov + upload / update súborov
                 for (const auto& [rel, l] : local_index) {
                     auto it = remote_index.find(rel);
 
                     if (l.is_dir) {
+                        // LOKÁLNE: priečinok
                         if (it == remote_index.end()) {
+                            // na serveri neexistuje -> vytvoríme priečinok
                             ops.push_back({Op::MKDIR, rel});
                         } else if (!it->second.is_dir) {
+                            // na serveri je na tej istej ceste súbor -> zmaž súbor, potom vytvor priečinok
                             ops.push_back({Op::DELETE_FILE, rel});
                             ops.push_back({Op::MKDIR, rel});
                         }
+                        // ak je na serveri tiež priečinok -> nič netreba
                     } else {
+                        // LOKÁLNE: súbor
                         if (it == remote_index.end()) {
+                            // súbor na serveri neexistuje -> stačí upload
                             ops.push_back({Op::UPLOAD_FILE, rel});
                         } else if (it->second.is_dir) {
+                            // na serveri je priečinok, lokálne súbor -> zmažeme priečinok, potom uploadneme súbor
                             ops.push_back({Op::DELETE_DIR, rel});
                             ops.push_back({Op::UPLOAD_FILE, rel});
                         } else if (it->second.hash != l.hash) {
+                            // súbor existuje na oboch stranách, ale hash je iný -> zmaz a znova uploadni
                             ops.push_back({Op::DELETE_FILE, rel});
                             ops.push_back({Op::UPLOAD_FILE, rel});
 
-                            std::cout << "[sync] changed file: " << rel << "\n"
-                                    << "  local hash : " << l.hash << "\n"
-                                    << "  remote hash: " << it->second.hash << "\n";
+                            // (voliteľný debug)
+                            // std::cout << "[sync] changed file: " << rel << "\n";
+                        } else {
+                            // hash je rovnaký -> SKIPPED (netreba nič robiť)
+                            skipped_files.push_back(rel);
                         }
                     }
+                }
+
+                std::cout << "\n[info] Planned operations:\n";
+                for (const auto& op : ops) {
+                    std::string op_name;
+                    switch (op.type) {
+                        case Op::MKDIR: op_name = "MKDIR      "; break;
+                        case Op::DELETE_FILE: op_name = "DELETE FILE"; break;
+                        case Op::DELETE_DIR: op_name = "DELETE DIR "; break;
+                        case Op::UPLOAD_FILE: op_name = "UPLOAD FILE"; break;
+                    }
+                    fs::path remote_full = fs::path(server_path) / fs::path(op.rel);
+                    std::cout << "  " << op_name << " : " << remote_full.generic_string() << "\n";
+                }
+                if (ops.empty()) {
+                    std::cout << "  (no operations needed, remote is already sync)\n";
+                } else {
+                    std::cout << "\n";
                 }
 
                 // DELETE súbory
@@ -1158,7 +1194,55 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-                std::cout << "\n[info] Synchronization finished.\n\n";
+                // --- SUMÁR SYNCU ---
+
+                std::cout << "\n";
+                // skipped files (rovnaký hash)
+                if (!skipped_files.empty()) {
+                    std::cout << "[info] skipped files (unchanged, hash OK):\n";
+                    for (const auto& rel : skipped_files) {
+                        fs::path remote_full = fs::path(server_path) / fs::path(rel);
+                        std::cout << "  " << remote_full.generic_string() << "\n";
+                    }
+                    std::cout << "\n[info] sync -> skipped " << skipped_files.size() << " file(s)\n\n";
+                } else {
+                    std::cout << "[info] skipped files: none\n";
+                }
+
+                std::cout << "\n[info] Synchronization finished.\n";
+
+                auto sync_end = std::chrono::steady_clock::now();
+                std::chrono::duration<double> elapsed = sync_end - sync_start;
+                double seconds = elapsed.count();
+                
+
+                                // --- spočítanie štatistík z ops ---
+                for (const auto& op : ops) {
+                    switch (op.type) {
+                        case Op::DELETE_FILE: deleted_files_count++; break;
+                        case Op::DELETE_DIR:  deleted_dirs_count++;  break;
+                        case Op::MKDIR:       created_dirs_count++;  break;
+                        case Op::UPLOAD_FILE: uploaded_files_count++; break;
+                    }
+                }
+
+                int skipped_count = static_cast<int>(skipped_files.size());
+
+                std::cout << "\n========================================\n";
+                std::cout << " SYNC summary\n";
+                std::cout << "  Local : " << local_path << "\n";
+                std::cout << "  Remote: " << server_path << "\n";
+                std::cout << "----------------------------------------\n";
+                std::cout << "  Created directories : " << created_dirs_count  << "\n";
+                std::cout << "  Deleted directories : " << deleted_dirs_count  << "\n";
+                std::cout << "  Deleted files       : " << deleted_files_count << "\n";
+                std::cout << "  Uploaded files      : " << uploaded_files_count << "\n";
+                std::cout << "  Skipped (unchanged) : " << skipped_count       << "\n";
+                std::cout << "----------------------------------------\n";
+                std::cout << "  Total time          : "
+                        << std::fixed << std::setprecision(2) << seconds << " s\n";
+                std::cout << "========================================\n\n";
+
                 
 
             } else {
