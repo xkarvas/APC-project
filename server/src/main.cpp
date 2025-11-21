@@ -35,18 +35,15 @@ static std::vector<unsigned char> hex_to_vec(const std::string& hex) {
     return out;
 }
 
-// constant-time porovnanie dvoch HEX reťazcov
 static bool ct_equal_hex(const std::string& a_hex, const std::string& b_hex) {
     auto a = hex_to_vec(a_hex);
     auto b = hex_to_vec(b_hex);
     if (a.size() != b.size()) return false;
     int rc = sodium_memcmp(a.data(), b.data(), a.size());
-    // (voliteľne) vynuluj dočasné buffre:
     sodium_memzero(a.data(), a.size());
     sodium_memzero(b.data(), b.size());
     return rc == 0;
 }
-
 
 std::string prepare_user_root(const std::string& root, const std::string& user) {
     fs::path base_root = root;
@@ -76,8 +73,6 @@ std::string prepare_user_root(const std::string& root, const std::string& user) 
     return canon.string();
 }
 
-
-
 inline std::string iso_now_utc() {
     using namespace std::chrono;
     auto t = system_clock::to_time_t(system_clock::now());
@@ -92,8 +87,6 @@ inline std::string iso_now_utc() {
     return oss.str();
 }
 
-
-// --- big-endian helpers (bez arpa/inet) ---
 static inline void write_u32_be(uint32_t v, unsigned char out[4]) {
     out[0] = (v >> 24) & 0xFF;
     out[1] = (v >> 16) & 0xFF;
@@ -113,7 +106,6 @@ static std::string trimQuotes(std::string s) {
 
 
 
-// --- blocking I/O ---
 static bool recv_json(tcp::socket& s, nlohmann::json& out) {
     unsigned char hdr[4];
     asio::error_code ec;
@@ -198,6 +190,78 @@ static uintmax_t directory_size(const fs::path& dir) {
         // ak zlyhá prístup k niektorému súboru, len preskočíme
     }
     return total;
+}
+
+std::string hash_file(const fs::path& path)
+{
+    const size_t HASH_LEN = 32;
+    unsigned char hash[HASH_LEN];
+
+    crypto_generichash_state state;
+    if (crypto_generichash_init(&state, nullptr, 0, HASH_LEN) != 0) {
+        throw std::runtime_error("crypto_generichash_init failed");
+    }
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) {
+        throw std::runtime_error("Cannot open file for hashing: " + path.string());
+    }
+
+    char buf[4096];
+    while (true) {
+        f.read(buf, sizeof(buf));
+        std::streamsize n = f.gcount();
+        if (n <= 0) break;
+        if (crypto_generichash_update(&state,
+                                      reinterpret_cast<unsigned char*>(buf),
+                                      static_cast<unsigned long long>(n)) != 0) {
+            throw std::runtime_error("crypto_generichash_update failed");
+        }
+    }
+
+    if (crypto_generichash_final(&state, hash, HASH_LEN) != 0) {
+        throw std::runtime_error("crypto_generichash_final failed");
+    }
+
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (size_t i = 0; i < HASH_LEN; ++i) {
+        oss << std::setw(2) << static_cast<int>(hash[i]);
+    }
+    return oss.str();
+}
+
+void build_dir_index(const fs::path& root_dir,
+                     const fs::path& current,
+                     nlohmann::json& entries)
+{
+    for (const auto& entry : fs::directory_iterator(current)) {
+        fs::path rel = fs::relative(entry.path(), root_dir);
+        std::string rel_str = rel.generic_string();
+
+        if (entry.is_directory()) {
+            entries.push_back({
+                {"rel", rel_str},
+                {"type", "dir"}
+            });
+
+            // rekurzia dovnútra
+            build_dir_index(root_dir, entry.path(), entries);
+        } else if (entry.is_regular_file()) {
+            std::uintmax_t size = 0;
+            std::error_code ec;
+            size = fs::file_size(entry.path(), ec);
+
+            std::string h = hash_file(entry.path());
+
+            entries.push_back({
+                {"rel", rel_str},
+                {"type", "file"},
+                {"size", size},
+                {"hash", h}
+            });
+        }
+    }
 }
 
 static void handle_client(tcp::socket sock, const fs::path& root) {
@@ -736,7 +800,62 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     std::error_code ec;
                     fs::remove(path_with_filename, ec);
                 }
+            } else if (cmd == "SYNC") {
+                std::string path = args.value("remote", "");
 
+                if (!is_path_under_root(root, path)) {
+                    send_json(sock, {
+                        {"cmd", "SYNC"},
+                        {"status", "ERROR"},
+                        {"code", 1},
+                        {"message", "Access denied: path is outside root"}
+                    });
+                    std::cout << "[error] " << sock.remote_endpoint()
+                              << " sync -> access denied, path: '" << path
+                              << "', root: '" << root << "'\n";
+                    continue;
+                }
+
+                fs::path p(path);
+                if (!fs::exists(p) || !fs::is_directory(p)) {
+                    send_json(sock, {
+                        {"cmd", "SYNC"},
+                        {"status", "ERROR"},
+                        {"code", 2},
+                        {"message", "Path is not existing directory on server"}
+                    });
+                    std::cout << "[error] " << sock.remote_endpoint()
+                              << " sync -> path not dir: '" << path << "'\n";
+                    continue;
+                }
+
+                try {
+                    nlohmann::json entries = nlohmann::json::array();
+                    build_dir_index(p, p, entries);
+
+                    send_json(sock, {
+                        {"cmd", "SYNC"},
+                        {"status", "OK"},
+                        {"code", 0},
+                        {"path", path},
+                        {"entries", entries}
+                    });
+
+                    std::cout << "[ok] " << sock.remote_endpoint()
+                              << " sync -> index for '" << path
+                              << "' sent, entries=" << entries.size() << "\n\n\n";
+                }
+                catch (const std::exception& e) {
+                    send_json(sock, {
+                        {"cmd", "SYNC"},
+                        {"status", "ERROR"},
+                        {"code", 3},
+                        {"message", std::string("Failed to build index: ") + e.what()}
+                    });
+                    std::cout << "[error] " << sock.remote_endpoint()
+                              << " sync -> exception: " << e.what() << "\n";
+
+                } 
             } else {
                 send_json(sock, {{"cmd", cmd}, {"status","ERROR"}, {"code",1}, {"message","Unknown command"}});
                 std::cout << "[error] " << sock.remote_endpoint() << " unknown command: " << cmd << "\n";

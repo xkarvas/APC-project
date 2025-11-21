@@ -13,6 +13,7 @@
 #include <fstream>
 #include <regex>
 #include <sodium.h>
+#include <sstream>
 
 
 
@@ -147,7 +148,6 @@ static void print_help_cmd(const std::string& CMD) {
     else std::cout << "Unknown command. Type HELP.\n";
 }
 
-// --- validátor argumentov podľa <> / [] ---------------
 static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size_t& max_all, std::string& usage) {
     // usage text
     if (CMD == "LIST")       { usage = "LIST [path]";                         min_req=0; max_all=1; }
@@ -160,8 +160,6 @@ static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size
     else if (CMD == "MOVE")  { usage = "MOVE <src> <dst>";                     min_req=2; max_all=2; }
     else if (CMD == "COPY")  { usage = "COPY <src> <dst>";                     min_req=2; max_all=2; }
     else if (CMD == "SYNC")  { usage = "SYNC <src> <dst>";                     min_req=2; max_all=2; }
-    else if (CMD == "AUTH")  { usage = "AUTH <username> <password>";           min_req=2; max_all=2; }
-    else if (CMD == "REGISTER"){usage="REGISTER <username> <password>";        min_req=2; max_all=2; }
     else if (CMD == "HELP")  { usage = "HELP [command]";                       min_req=0; max_all=1; }
     else if (CMD == "EXIT" || CMD=="QUIT") { usage = "EXIT";                   min_req=0; max_all=0; }
     else { usage = ""; min_req=0; max_all=0; return false; }
@@ -241,6 +239,181 @@ std::pair<std::string,std::string> splitUserIp(const std::string& s) {
 
     return {user, ip};
 }
+
+bool do_upload(tcp::socket& sock,
+               const std::string& port,
+               const std::string& root,
+               const fs::path& local_full,
+               const fs::path& remote_dir_for_file)
+{
+    // 1) prvý UPLOAD command – to isté, ako keď user napíše UPLOAD
+    nlohmann::json args_up = {
+        {"local",  local_full.generic_string()},
+        {"remote", remote_dir_for_file.generic_string()}
+    };
+    nlohmann::json req_up = {
+        {"client_port", port},
+        {"cmd", "UPLOAD"},
+        {"args", args_up},
+        {"root", root}
+    };
+    send_json(sock, req_up);
+
+    nlohmann::json resp_up;
+    if (!recv_json(sock, resp_up)) {
+        std::cout << "[upload] server closed connection\n";
+        return false;
+    }
+    if (resp_up.value("status", "") != "OK") {
+        std::cout << "[upload] server rejected upload to '"
+                  << remote_dir_for_file << "': "
+                  << resp_up.value("message", "") << "\n";
+        return false;
+    }
+
+    // 2) otvor lokálny súbor
+    const size_t CHUNK_SIZE = 64 * 1024;
+    std::ifstream file(local_full, std::ios::binary);
+    if (!file.is_open()) {
+        std::cout << "[upload] cannot open local file " << local_full << "\n";
+        return false;
+    }
+
+    int64_t file_size = fs::file_size(local_full);
+    int64_t total_chunks = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+
+    std::cout << "[upload] starting file '" << local_full
+              << "' (" << file_size << " bytes, "
+              << total_chunks << " chunks)\n";
+
+    // 3) pošli meta-informácie (veľkosť, chunk_size, počet chunkov)
+    nlohmann::json meta = {
+        {"cmd", "UPLOAD"},
+        {"status", "OK"},
+        {"size", file_size},
+        {"chunk_size", (int64_t)CHUNK_SIZE},
+        {"total_chunks", total_chunks}
+    };
+    send_json(sock, meta);
+
+    // 4) server povie „OK, posielaj chunky“
+    nlohmann::json resp_meta;
+    if (!recv_json(sock, resp_meta) || resp_meta.value("status", "") != "OK") {
+        std::cout << "[upload] server did not accept chunks for "
+                  << local_full << "\n";
+        file.close();
+        return false;
+    }
+
+    // 5) pošli chunky + ACK – presne ako v tvojom UPLOADe
+    int64_t sent_total = 0;
+    int err = 0;
+    for (int64_t i = 0; i < total_chunks; ++i) {
+        size_t to_read = static_cast<size_t>(
+            std::min<int64_t>(CHUNK_SIZE, file_size - sent_total)
+        );
+        std::vector<char> buffer(to_read);
+        file.read(buffer.data(), to_read);
+        size_t actually_read = file.gcount();
+
+        nlohmann::json header = {
+            {"chunk_index", i},
+            {"size", (int64_t)actually_read}
+        };
+        send_json(sock, header);
+        asio::write(sock, asio::buffer(buffer.data(), actually_read));
+
+        nlohmann::json ack;
+        if (!recv_json(sock, ack) ||
+            ack.value("status","") != "OK" ||
+            ack.value("ack",-1) != i) {
+            std::cout << "\n[upload] error sending chunk " << i
+                      << " of file " << local_full << "\n";
+            err = 1;
+            break;
+        }
+
+        sent_total += actually_read;
+        double progress = (file_size > 0)
+            ? (100.0 * sent_total / file_size)
+            : 0.0;
+        std::cout << "\r[upload] " << local_full.filename().string()
+                  << " " << std::fixed << std::setprecision(1)
+                  << progress << "%" << std::flush;
+    }
+    std::cout << "\n";
+
+    file.close();
+    return err == 0;
+}
+
+std::string hash_file_local(const fs::path& path)
+{
+    const size_t HASH_LEN = 32;
+    unsigned char hash[HASH_LEN];
+
+    crypto_generichash_state state;
+    if (crypto_generichash_init(&state, nullptr, 0, HASH_LEN) != 0) {
+        throw std::runtime_error("crypto_generichash_init failed");
+    }
+
+    std::ifstream f(path, std::ios::binary);
+    if (!f.is_open()) {
+        throw std::runtime_error("Cannot open file for hashing: " + path.string());
+    }
+
+    char buf[4096];
+    while (true) {
+        f.read(buf, sizeof(buf));
+        std::streamsize n = f.gcount();
+        if (n <= 0) break;
+        if (crypto_generichash_update(&state,
+                                      reinterpret_cast<unsigned char*>(buf),
+                                      static_cast<unsigned long long>(n)) != 0) {
+            throw std::runtime_error("crypto_generichash_update failed");
+        }
+    }
+
+    if (crypto_generichash_final(&state, hash, HASH_LEN) != 0) {
+        throw std::runtime_error("crypto_generichash_final failed");
+    }
+
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0');
+    for (size_t i = 0; i < HASH_LEN; ++i) {
+        oss << std::setw(2) << static_cast<int>(hash[i]);
+    }
+    return oss.str();
+}
+
+struct LocalEntry {
+    bool is_dir;
+    std::uintmax_t size;
+    std::string hash; // len pre súbory
+};
+
+void build_local_index(const fs::path& root_dir,
+                       const fs::path& current,
+                       std::map<std::string, LocalEntry>& out)
+{
+    for (const auto& entry : fs::directory_iterator(current)) {
+        fs::path rel = fs::relative(entry.path(), root_dir);
+        std::string rel_str = rel.generic_string();
+
+        if (entry.is_directory()) {
+            out[rel_str] = {true, 0, ""};
+            build_local_index(root_dir, entry.path(), out);
+        } else if (entry.is_regular_file()) {
+            std::error_code ec;
+            std::uintmax_t size = fs::file_size(entry.path(), ec);
+            std::string h = hash_file_local(entry.path());
+            out[rel_str] = {false, size, h};
+        }
+    }
+}
+
+
+
 
 int main(int argc, char* argv[]) {
     if (argc < 2) { std::cerr << "Wrong arguments\n"; return 1; }
@@ -522,7 +695,18 @@ int main(int argc, char* argv[]) {
 
 
             } else if (CMD == "SYNC") {
-                args["src"] = toks[1]; args["dst"] = toks[2];
+                args["local"] = toks[1]; args["remote"] = toks[2];
+
+                if (!(args["remote"].get<std::string>().starts_with("/"))) {
+                    args["remote"] = dir + "/" + args["remote"].get<std::string>();
+                } 
+                std::string local_path = args["local"].get<std::string>();
+                if (!fs::exists(local_path) || !fs::is_directory(local_path)) {
+                    std::cout << "\n[warning] Local path '" << local_path 
+                            << "' must be an existing directory!\n\n";
+                    continue; 
+                }
+
             } else {
                 std::cout << "[warning] unknown command. Type HELP.\n";
                 continue;
@@ -531,8 +715,7 @@ int main(int argc, char* argv[]) {
             // Odoslanie žiadosti
             nlohmann::json req = {{"client_port", port},{"cmd", CMD}, {"args", args}, {"root", root}};
             send_json(sock, req);
-
-            // Odpoveď - zatial 
+ 
             nlohmann::json resp;
             if (!recv_json(sock, resp)) { std::cout << "[error] server closed\n"; break; }
 
@@ -811,8 +994,174 @@ int main(int argc, char* argv[]) {
                 } else {
                     send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "Upload interrupted"}});
                 }
-            }
-            else {
+            } else if (CMD == "SYNC") {
+
+                if (resp.value("status", "") != "OK") {
+                    std::cout << "[error] Server error: "
+                            << resp.value("message", "unknown error") << "\n";
+                    continue;
+                }
+                fs::path local_path = args["local"].get<std::string>();
+                std::string server_path = args["remote"].get<std::string>();
+
+                auto entries_json = resp.value("entries", nlohmann::json::array());
+
+                struct RemoteEntry {
+                    bool is_dir;
+                    std::uintmax_t size;
+                    std::string hash;
+                };
+
+                std::map<std::string, RemoteEntry> remote_index;
+
+                for (auto& e : entries_json) {
+                    std::string rel = e.value("rel", "");
+                    std::string type = e.value("type", "");
+
+                    if (type == "dir") {
+                        remote_index[rel] = {true, 0, ""};
+                    } else if (type == "file") {
+                        std::uintmax_t size = e.value("size", 0);
+                        std::string hash = e.value("hash", "");
+                        remote_index[rel] = {false, size, hash};
+                    }
+                }
+
+
+                std::map<std::string, LocalEntry> local_index;
+                build_local_index(local_path, local_path, local_index);
+
+
+                struct Op {
+                    enum Type { MKDIR, DELETE_FILE, DELETE_DIR, UPLOAD_FILE } type;
+                    std::string rel; // relatívna cesta
+                };
+
+                std::vector<Op> ops;
+
+                for (const auto& [rel, r] : remote_index) {
+                    if (!local_index.count(rel)) {
+                        if (r.is_dir) {
+                            ops.push_back({Op::DELETE_DIR, rel});
+                        } else {
+                            ops.push_back({Op::DELETE_FILE, rel});
+                        }
+                    }
+                }
+
+                for (const auto& [rel, l] : local_index) {
+                    auto it = remote_index.find(rel);
+
+                    if (l.is_dir) {
+                        if (it == remote_index.end()) {
+                            ops.push_back({Op::MKDIR, rel});
+                        } else if (!it->second.is_dir) {
+                            ops.push_back({Op::DELETE_FILE, rel});
+                            ops.push_back({Op::MKDIR, rel});
+                        }
+                    } else {
+                        if (it == remote_index.end()) {
+                            ops.push_back({Op::UPLOAD_FILE, rel});
+                        } else if (it->second.is_dir) {
+                            ops.push_back({Op::DELETE_DIR, rel});
+                            ops.push_back({Op::UPLOAD_FILE, rel});
+                        } else if (it->second.hash != l.hash) {
+                            ops.push_back({Op::DELETE_FILE, rel});
+                            ops.push_back({Op::UPLOAD_FILE, rel});
+
+                            std::cout << "[sync] changed file: " << rel << "\n"
+                                    << "  local hash : " << l.hash << "\n"
+                                    << "  remote hash: " << it->second.hash << "\n";
+                        }
+                    }
+                }
+
+                // DELETE súbory
+                for (const auto& op : ops) {
+                    if (op.type != Op::DELETE_FILE) continue;
+                    fs::path remote_full = fs::path(server_path) / fs::path(op.rel);
+                    nlohmann::json req_del = {
+                        {"cmd", "DELETE"},
+                        {"root", root},
+                        {"args", {
+                            {"path", remote_full.generic_string()}
+                        }}
+                    };
+                    send_json(sock, req_del);
+                    nlohmann::json r;
+                    recv_json(sock, r);
+                }
+
+                // DELETE priečinky (RMDIR) 
+                std::vector<std::string> dirs_to_delete;
+                for (const auto& op : ops) {
+                    if (op.type == Op::DELETE_DIR) {
+                        dirs_to_delete.push_back(op.rel);
+                    }
+                }
+                std::sort(dirs_to_delete.begin(), dirs_to_delete.end(),
+                        [](const std::string& a, const std::string& b){
+                            return a.size() > b.size(); // dlhšia (hlbšia) najprv
+                        });
+
+                for (const auto& rel : dirs_to_delete) {
+                    fs::path remote_full = fs::path(server_path) / fs::path(rel);
+                    nlohmann::json req_rmdir = {
+                        {"cmd", "RMDIR"},
+                        {"root", root},
+                        {"args", {
+                            {"path", remote_full.generic_string()}
+                        }}
+                    };
+                    send_json(sock, req_rmdir);
+                    nlohmann::json r;
+                    recv_json(sock, r);
+                }
+
+                //  MKDIR
+                for (const auto& op : ops) {
+                    if (op.type != Op::MKDIR) continue;
+                    fs::path remote_full = fs::path(server_path) / fs::path(op.rel);
+                    nlohmann::json req_mkdir = {
+                        {"cmd", "MKDIR"},
+                        {"root", root},
+                        {"args", {
+                            {"path", remote_full.generic_string()}
+                        }}
+                    };
+                    send_json(sock, req_mkdir);
+                    nlohmann::json r;
+                    recv_json(sock, r);
+                }
+
+
+                // UPLOAD súbory – teraz pridáme
+                for (const auto& op : ops) {
+                    if (op.type != Op::UPLOAD_FILE) continue;
+
+                    // plná lokálna cesta k súboru
+                    fs::path local_full = local_path / fs::path(op.rel);
+                    // cieľový adresár na serveri
+                    fs::path remote_dir_for_file =
+                        fs::path(server_path) / fs::path(op.rel).parent_path();
+
+                    if (!fs::exists(local_full) || fs::is_directory(local_full)) {
+                        std::cout << "[info] skip (not a file): " << local_full << "\n";
+                        continue;
+                    }
+
+                    if (do_upload(sock, port, root, local_full, remote_dir_for_file)) {
+                        std::cout << "[ok] uploaded " << local_full
+                                << " -> " << remote_dir_for_file << "\n";
+                    } else {
+                        std::cout << "[error] upload FAILED for " << local_full << "\n";
+                    }
+                }
+
+                std::cout << "\n[info] Synchronization finished.\n\n";
+                
+
+            } else {
                 std::string status = resp.value("status", "ERROR");
                 std::string message = resp.value("message", "");
                 if (status == "OK") {
