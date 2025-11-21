@@ -534,7 +534,7 @@ int main(int argc, char* argv[]) {
 
             // Odpoveď - zatial 
             nlohmann::json resp;
-            if (!recv_json(sock, resp)) { std::cout << "[client] server closed\n"; break; }
+            if (!recv_json(sock, resp)) { std::cout << "[error] server closed\n"; break; }
 
             if (CMD == "LIST") {
                 if (resp.value("status", "ERROR") == "OK") {

@@ -1,4 +1,5 @@
 build/
+# macOS bordel
 .DS_Store
-client/.DS_Store
-server/.DS_Store
+**/.DS_Store
+*/.DS_Store
