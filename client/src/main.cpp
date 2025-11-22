@@ -1185,7 +1185,9 @@ int main(int argc, char* argv[]) {
                         send_json(sock, ack);
 
                         // priebežný výpis
-                        double progress = (file_size > 0) ? (100.0 * received_total / file_size) : 0.0;
+                        double progress = (total_chunks > 0)
+                                            ? (100.0 * (i + 1) / static_cast<double>(total_chunks))
+                                            : 0.0;
                         std::cout << "\r[download] chunk " << (i + 1) << "/" << total_chunks
                                 << " (" << std::fixed << std::setprecision(1) << progress << "%)" << std::flush;
                     }
