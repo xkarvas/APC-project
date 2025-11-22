@@ -1,5 +1,19 @@
 {
   "users": {
+    "danielka": {
+      "last_login_at": "2025-11-22T19:12:45Z",
+      "password_hash": "0393b391006b2a47986ccd7b92e4e8b6217c32031874e1846be8127643fc1e9c",
+      "registered_at": "2025-11-22T18:41:45Z",
+      "salt": "2pYdPhlUDuOgG2hLWlTZDw",
+      "user": "danielka"
+    },
+    "danielka2": {
+      "last_login_at": "2025-11-22T19:09:48Z",
+      "password_hash": "3044acf2f2830bcb771b4ae16150fe38b039fd4e87303f665348f45e17abaae1",
+      "registered_at": "2025-11-22T19:09:48Z",
+      "salt": "eANMDyjdas9_fDnNdWnktA",
+      "user": "danielka2"
+    },
     "e": {
       "last_login_at": "2025-11-21T18:05:29Z",
       "password_hash": "53eb36b6923da13cbc4ca2894bb632f677eb8e0d65ca031190e2e301482d5e89",

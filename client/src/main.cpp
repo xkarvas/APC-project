@@ -113,39 +113,167 @@ static std::string argon2id_hex_b64salt(const std::string& password,
 
 
 static void print_help_all() {
-    std::cout <<
-R"(Commands (<> required, [] optional):
+    using std::cout;
+    using std::left;
+    using std::setw;
 
-  LIST [path]
-  UPLOAD <local_path> [remote_path]
-  DOWNLOAD <remote_path> [local_path]
-  DELETE <path>
-  CD <path>
-  MKDIR <path>
-  RMDIR <path>
-  MOVE <src> <dst>
-  COPY <src> <dst>
-  SYNC <src> <dst>
-  HELP [command]
-  EXIT
-)"
-    << std::endl;
+    // jednoduchá hlavička (bez farieb, aby to fungovalo všade)
+    cout << "\n"
+         << "╔══════════════════════════════════════════════╗\n"
+         << "║              MiniDrive – HELP                ║\n"
+         << "╚══════════════════════════════════════════════╝\n\n";
+
+    cout << "  Commands (<> required, [] optional):\n\n";
+
+    struct Row {
+        const char* cmd;
+        const char* args;
+        const char* desc;
+    };
+
+    Row rows[] = {
+        {"LIST",     "[path]",                      "List directory contents (default: current remote dir)"},
+        {"UPLOAD",   "<local_path> <remote_dir>",   "Upload local file into remote directory"},
+        {"DOWNLOAD", "<remote_path> <local_dir>",   "Download remote file into local directory"},
+        {"DELETE",   "<path>",                      "Delete a remote file"},
+        {"CD",       "<path>",                      "Change remote working directory"},
+        {"MKDIR",    "<path>",                      "Create a remote directory (recursively)"},
+        {"RMDIR",    "<path>",                      "Remove a remote directory (recursively)"},
+        {"MOVE",     "<src> <dst>",                 "Move / rename file or directory on server"},
+        {"COPY",     "<src> <dst>",                 "Copy file or directory on server"},
+        {"SYNC",     "<local> <remote>",            "One-way sync: make remote directory match local"},
+        {"HELP",     "[command]",                   "Show this help or detailed help for a command"},
+        {"EXIT",     "",                            "Exit client (also: QUIT, Q, E)"}
+    };
+
+    const int w_cmd  = 10;
+    const int w_args = 24;
+
+    cout << "  " << left << setw(w_cmd)  << "CMD"
+         << " " << left << setw(w_args) << "ARGS"
+         << "DESCRIPTION\n";
+
+    cout << "  " << std::string(w_cmd + w_args + 35, '-') << "\n";
+
+    for (const auto& r : rows) {
+        cout << "  " << left << setw(w_cmd)  << r.cmd
+             << " " << left << setw(w_args) << r.args
+             << r.desc << "\n";
+    }
+
+    cout << "\n"
+         << "  Examples:\n"
+         << "    LIST\n"
+         << "    UPLOAD /Users/ervinkarvas/reqs-tf.txt /docs\n"
+         << "    DOWNLOAD /docs/report.pdf /Users/ervinkarvas\n"
+         << "    SYNC /Users/ervinkarvas /backup/ervinkarvas\n\n";
 }
 
 static void print_help_cmd(const std::string& CMD) {
-    if (CMD == "LIST")       std::cout << "LIST [path]\n  List directory (default '.')\n";
-    else if (CMD == "UPLOAD")std::cout << "UPLOAD <local_path> [remote_path]\n  If [remote_path] missing, uses basename(local_path)\n";
-    else if (CMD == "DOWNLOAD")std::cout << "DOWNLOAD <remote_path> [local_path]\n  If [local_path] missing, uses basename(remote_path)\n";
-    else if (CMD == "DELETE")std::cout << "DELETE <path>\n";
-    else if (CMD == "CD")    std::cout << "CD <path>\n  Change remote working directory\n";
-    else if (CMD == "MKDIR") std::cout << "MKDIR <path>\n";
-    else if (CMD == "RMDIR") std::cout << "RMDIR <path>\n";
-    else if (CMD == "MOVE")  std::cout << "MOVE <src> <dst>\n";
-    else if (CMD == "COPY")  std::cout << "COPY <src> <dst>\n";
-    else if (CMD == "SYNC")  std::cout << "SYNC <src> <dst>\n  Synchronize local->remote\n";
-    else if (CMD == "HELP")  std::cout << "HELP [command]\n";
-    else if (CMD == "EXIT")  std::cout << "EXIT\n";
-    else std::cout << "Unknown command. Type HELP.\n";
+    using std::cout;
+
+    if (CMD == "LIST") {
+        cout <<
+            "\nLIST [path]\n"
+            "  List contents of a remote directory.\n"
+            "  - If [path] is omitted, the current remote directory is used.\n"
+            "  - Example: LIST\n"
+            "             LIST /backup/photos\n\n";
+    }
+    else if (CMD == "UPLOAD") {
+        cout <<
+            "\nUPLOAD <local_path> <remote_dir>\n"
+            "  Upload a local file into a remote directory.\n"
+            "  - <local_path>  : path to an existing local file.\n"
+            "  - <remote_dir>  : existing directory on the server.\n"
+            "  The file keeps its original filename on the server.\n"
+            "  - Example: UPLOAD report.pdf /docs\n\n";
+    }
+    else if (CMD == "DOWNLOAD") {
+        cout <<
+            "\nDOWNLOAD <remote_path> <local_dir>\n"
+            "  Download a remote file into a local directory.\n"
+            "  - <remote_path> : full path to a file on the server.\n"
+            "  - <local_dir>   : existing local directory; the filename\n"
+            "                    is taken from <remote_path>.\n"
+            "  - Example: DOWNLOAD /docs/report.pdf /downloads\n\n";
+    }
+    else if (CMD == "DELETE") {
+        cout <<
+            "\nDELETE <path>\n"
+            "  Delete a remote file.\n"
+            "  - <path> must be an existing file on the server.\n"
+            "  - Use RMDIR for directories.\n"
+            "  - Example: DELETE /docs/report.pdf\n\n";
+    }
+    else if (CMD == "CD") {
+        cout <<
+            "\nCD <path>\n"
+            "  Change the current remote working directory.\n"
+            "  - Use absolute or relative paths.\n"
+            "  - Special values:\n"
+            "      .   -> stay in current directory\n"
+            "      ..  -> go back to root of your repository\n"
+            "  - Example: CD /backup\n\n";
+    }
+    else if (CMD == "MKDIR") {
+        cout <<
+            "\nMKDIR <path>\n"
+            "  Create a remote directory (recursively if needed).\n"
+            "  - Fails if the directory already exists.\n"
+            "  - Example: MKDIR /backup/2025/week-11\n\n";
+    }
+    else if (CMD == "RMDIR") {
+        cout <<
+            "\nRMDIR <path>\n"
+            "  Remove a remote directory and its contents recursively.\n"
+            "  - Use with care: this permanently deletes everything inside.\n"
+            "  - Example: RMDIR /backup/tmp\n\n";
+    }
+    else if (CMD == "MOVE") {
+        cout <<
+            "\nMOVE <src> <dst>\n"
+            "  Move or rename a file or directory on the server.\n"
+            "  - Works both as rename and as move between directories.\n"
+            "  - Example: MOVE /docs/report.pdf /archive/report_old.pdf\n"
+            "             MOVE /docs/report.pdf /docs/report_old.pdf\n\n";
+    }
+    else if (CMD == "COPY") {
+        cout <<
+            "\nCOPY <src> <dst>\n"
+            "  Copy a file or directory on the server.\n"
+            "  - Directories are copied recursively.\n"
+            "  - Example: COPY /docs /backup/docs_copy\n\n";
+    }
+    else if (CMD == "SYNC") {
+        cout <<
+            "\nSYNC <local_dir> <remote_dir>\n"
+            "  One-way synchronization: LOCAL → REMOTE.\n"
+            "  - Both <local_dir> (on client) and <remote_dir> (on server)\n"
+            "    must be existing directories.\n"
+            "  - After SYNC, <remote_dir> will match <local_dir>:\n"
+            "      * files/dirs missing on server are created,\n"
+            "      * extra files/dirs on server are deleted,\n"
+            "      * changed files (by hash) are re-uploaded.\n"
+            "  - Operation is recursive.\n"
+            "  - Example: SYNC /project /backup/project\n\n";
+    }
+    else if (CMD == "HELP") {
+        cout <<
+            "\nHELP [command]\n"
+            "  Show general help or detailed help for a specific command.\n"
+            "  - Example: HELP\n"
+            "             HELP SYNC\n\n";
+    }
+    else if (CMD == "EXIT") {
+        cout <<
+            "\nEXIT\n"
+            "  Exit the client.\n"
+            "  - Aliases: QUIT, Q, E\n\n";
+    }
+    else {
+        std::cout << "\nUnknown command. Type HELP for the list of commands.\n\n";
+    }
 }
 
 static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size_t& max_all, std::string& usage) {
@@ -271,7 +399,6 @@ bool do_upload(tcp::socket& sock,
         return false;
     }
 
-    // 2) otvor lokálny súbor
     const size_t CHUNK_SIZE = 64 * 1024;
     std::ifstream file(local_full, std::ios::binary);
     if (!file.is_open()) {
@@ -286,7 +413,6 @@ bool do_upload(tcp::socket& sock,
               << "' (" << file_size << " bytes, "
               << total_chunks << " chunks)\n";
 
-    // 3) pošli meta-informácie (veľkosť, chunk_size, počet chunkov)
     nlohmann::json meta = {
         {"cmd", "UPLOAD"},
         {"status", "OK"},
@@ -296,7 +422,6 @@ bool do_upload(tcp::socket& sock,
     };
     send_json(sock, meta);
 
-    // 4) server povie „OK, posielaj chunky“
     nlohmann::json resp_meta;
     if (!recv_json(sock, resp_meta) || resp_meta.value("status", "") != "OK") {
         std::cout << "[upload] server did not accept chunks for "
@@ -305,7 +430,6 @@ bool do_upload(tcp::socket& sock,
         return false;
     }
 
-    // 5) pošli chunky + ACK – presne ako v tvojom UPLOADe
     int64_t sent_total = 0;
     int err = 0;
     for (int64_t i = 0; i < total_chunks; ++i) {
@@ -455,13 +579,23 @@ int main(int argc, char* argv[]) {
         }
 
         if (auth.value("mode", "") == "public") {
-            std::cout 
-                << "===============================================\n"
-                << "  MiniDrive Client — connected to " << host << ":" << port << "\n"
-                << "===============================================\n";
-            std::cout << "[client] connected to " << host << ":" << port << "\n";
-            std::cout << "[warning] operating in public mode - files are visible to everyone\n";
-            std::cout << "===============================================\n\n";
+            std::cout
+                << "\n"
+                << "╔══════════════════════════════════════════════╗\n"
+                << "║           MiniDrive Client – PUBLIC          ║\n"
+                << "╠══════════════════════════════════════════════╣\n"
+                << "║  Connected to: " << host << ":" << port << "\n"
+                << "╠══════════════════════════════════════════════╣\n"
+                << "║  MODE: PUBLIC                                ║\n"
+                << "║  - All files in this repository are          ║\n"
+                << "║    visible to anyone connecting in public    ║\n"
+                << "║    mode.                                     ║\n"
+                << "║                                              ║\n"
+                << "║  Do NOT store sensitive or private data here.║\n"
+                << "╚══════════════════════════════════════════════╝\n\n";
+
+            std::cout << "[client] connected to " << host << ":" << port << " (public mode)\n\n";
+
         } else {
 
             if (auth.value("next","") == "LOGIN") {
@@ -490,15 +624,23 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
 
-                std::cout 
-                    << "===============================================\n"
-                    << "  MiniDrive Client — connected to " << host << ":" << port << "\n"
-                    << "===============================================\n";
-                std::cout << "             Welcome " << user << "!\n";
-                std::cout << "      You are in your private repositary\n";
-                std::cout << "===============================================\n\n";
+                std::cout
+                << "\n"
+                << "╔══════════════════════════════════════════════╗\n"
+                << "║           MiniDrive Client – PRIVATE         ║\n"
+                << "╠══════════════════════════════════════════════╣\n"
+                << "║  User:      " << user << "\n"
+                << "║  Connected: " << host << ":" << port << "\n"
+                << "╠══════════════════════════════════════════════╣\n"
+                << "║  MODE: PRIVATE                               ║\n"
+                << "║  - This is your personal repository.         ║\n"
+                << "║  - Other users cannot see your files.        ║\n"
+                << "║                                              ║\n"
+                << "║  Type HELP to see available commands.        ║\n"
+                << "╚══════════════════════════════════════════════╝\n\n";
 
-
+                std::cout << "[client] connected to " << host << ":" << port
+                        << " as '" << user << "' (private mode)\n\n";
                 
 
 
@@ -531,14 +673,23 @@ int main(int argc, char* argv[]) {
                     return 1;
                 }
 
-                std::cout 
-                    << "===============================================\n"
-                    << "  MiniDrive Client — connected to " << host << ":" << port << "\n"
-                    << "===============================================\n";
-                std::cout << "             Welcome " << user << "!\n";
-                std::cout << "      You are in your private repositary\n";
-                std::cout << "===============================================\n\n";
+               std::cout
+                << "\n"
+                << "╔══════════════════════════════════════════════╗\n"
+                << "║           MiniDrive Client – PRIVATE         ║\n"
+                << "╠══════════════════════════════════════════════╣\n"
+                << "║  User:      " << user << "\n"
+                << "║  Connected: " << host << ":" << port << "\n"
+                << "╠══════════════════════════════════════════════╣\n"
+                << "║  MODE: PRIVATE                               ║\n"
+                << "║  - This is your personal repository.         ║\n"
+                << "║  - Other users cannot see your files.        ║\n"
+                << "║                                              ║\n"
+                << "║  Type HELP to see available commands.        ║\n"
+                << "╚══════════════════════════════════════════════╝\n\n";
 
+                std::cout << "[client] connected to " << host << ":" << port
+                        << " as '" << user << "' (private mode)\n\n";
 
             }
         }
@@ -647,6 +798,10 @@ int main(int argc, char* argv[]) {
                 if (!(args["dst"].get<std::string>().starts_with("/"))) {
                     args["dst"] = dir + "/" + args["dst"].get<std::string>();
                 }
+                if (is_path_under(args["src"].get<std::string>(), args["dst"].get<std::string>())) {
+                    std::cout << "\n[error] Cannot COPY: source path cannot be inside destination path!\nIt could cause recursive copying or other unintended behavior.\n\n";
+                    continue; 
+                }
             } else if (CMD == "DOWNLOAD") {
                 args["remote"] = toks[1]; args["local"] = toks[2];
 
@@ -700,6 +855,11 @@ int main(int argc, char* argv[]) {
                 if (!(args["remote"].get<std::string>().starts_with("/"))) {
                     args["remote"] = dir + "/" + args["remote"].get<std::string>();
                 } 
+                if (is_path_under(args["local"].get<std::string>(), args["remote"].get<std::string>())) {
+                    std::cout << "\n[error] Cannot SYNC: remote path cannot be inside local path!\nIt could cause recursive copying or other unintended behavior.\n\n";
+                    continue; 
+                }
+
                 std::string local_path = args["local"].get<std::string>();
                 if (!fs::exists(local_path) || !fs::is_directory(local_path)) {
                     std::cout << "\n[warning] Local path '" << local_path 
