@@ -1,4 +1,5 @@
 build/
+logs/
 # macOS bordel
 .DS_Store
 **/.DS_Store

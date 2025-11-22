@@ -23,6 +23,26 @@ namespace fs = std::filesystem;
 
 using asio::ip::tcp;
 
+
+
+static std::string now_timestamp()
+{
+    using namespace std::chrono;
+    auto now = system_clock::now();
+    std::time_t t = system_clock::to_time_t(now);
+
+    std::tm tm{};
+#if defined(_WIN32)
+    localtime_s(&tm, &t);
+#else
+    localtime_r(&t, &tm);
+#endif
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+    return oss.str();
+}
+
 // --- big-endian helpers ---
 static inline void write_u32_be(uint32_t v, unsigned char out[4]) {
     out[0] = (v >> 24) & 0xFF;
@@ -540,16 +560,107 @@ void build_local_index(const fs::path& root_dir,
 
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) { std::cerr << "Wrong arguments\n"; return 1; }
-    
-    std::string ep = argv[1]; 
-    auto pos = ep.rfind(':');
-    if (pos == std::string::npos) { std::cerr << "Usage: [error] client <host:port>\n"; return 1; }
-    std::string host_ip = ep.substr(0, pos);
-    std::string port = ep.substr(pos + 1);
-    
+    if (argc < 2) {
+        std::cerr
+            << "Usage:\n"
+            << "  " << argv[0] << " [username@]<server_ip>:<port> [--log <log_file>]\n\n";
+        return 1;
+    }
 
+    std::string endpoint = argv[1];
+    std::string log_path;
+    bool use_log = false;
+
+    for (int i = 2; i < argc; ) {
+        std::string arg = argv[i];
+
+        if (arg == "--log") {
+            if (i + 1 >= argc) {
+                std::cerr << "[error] missing value for --log\n";
+                return 1;
+            }
+            log_path = argv[i + 1];
+            use_log = true;
+            i += 2;
+        } else if (arg.rfind("--log=", 0) == 0) {
+            // voliteľná podpora: --log=client.log
+            log_path = arg.substr(std::string("--log=").size());
+            if (log_path.empty()) {
+                std::cerr << "[error] empty log file name in --log=\n";
+                return 1;
+            }
+            use_log = true;
+            i += 1;
+        } else {
+            std::cerr
+                << "[error] unknown argument: '" << arg << "'\n"
+                << "Usage:\n"
+                << "  " << argv[0] << " [username@]<server_ip>:<port> [--log <log_file>]\n";
+            return 1;
+        }
+    }
+
+
+    auto pos = endpoint.rfind(':');
+    if (pos == std::string::npos || pos == 0 || pos == endpoint.size() - 1) {
+        std::cerr
+            << "[error] invalid endpoint: '" << endpoint << "'\n"
+            << "        expected [username@]<server_ip>:<port>\n";
+        return 1;
+    }
+
+    std::string host_ip = endpoint.substr(0, pos);   
+    std::string port    = endpoint.substr(pos + 1);  
+
+    try {
+        int p = std::stoi(port);
+        if (p < 1 || p > 65535) {
+            throw std::out_of_range("port");
+        }
+    } catch (...) {
+        std::cerr
+            << "[error] invalid port: '" << port << "'\n"
+            << "        expected integer in range 1..65535\n";
+        return 1;
+    }
+
+    // rozdelenie [username@]<ip> -> user + ipv4
     auto [user, host] = splitUserIp(host_ip);
+    if (host.empty()) {
+        std::cerr
+            << "[error] invalid host/ip part: '" << host_ip << "'\n"
+            << "        expected IPv4 address, e.g. 127.0.0.1 or name@127.0.0.1\n";
+        return 1;
+    }
+
+    std::ofstream log_file;
+    if (use_log) {
+        log_file.open(log_path, std::ios::out | std::ios::app);
+        if (!log_file.is_open()) {
+            std::cerr
+                << "[error] cannot open log file: '" << log_path << "'\n";
+            return 1;
+        }
+
+    }
+    auto log = [&](const std::string& level,
+                const std::string& msg,
+                const std::string& cmd = std::string{}) 
+    {
+        std::string line = now_timestamp() + " [" + level + "] ";
+
+        if (!cmd.empty()) {
+            line += "(" + cmd + ") ";
+        }
+
+        line += msg + "\n";
+
+        if (use_log && log_file.is_open()) {
+            log_file << line;
+            log_file.flush();
+        }
+    };
+
 
     //std::cout << "User: " << user << ", Host: " << host << "\n";
 
@@ -595,6 +706,7 @@ int main(int argc, char* argv[]) {
                 << "╚══════════════════════════════════════════════╝\n\n";
 
             std::cout << "[client] connected to " << host << ":" << port << " (public mode)\n\n";
+            log("info", "Client connected to " + host + ":" + port + " in public mode.");
 
         } else {
 
@@ -643,7 +755,8 @@ int main(int argc, char* argv[]) {
                         << " as '" << user << "' (private mode)\n\n";
                 
 
-
+                log("info", "Client " + user + " successfully logged in.");
+                log("info", "Client " + user + " connected to " + host + ":" + port);
 
 
 
@@ -690,6 +803,8 @@ int main(int argc, char* argv[]) {
 
                 std::cout << "[client] connected to " << host << ":" << port
                         << " as '" << user << "' (private mode)\n\n";
+                log("info", "Client " + user + " successfully registered.");
+                log("info", "Client " + user + " connected to " + host + ":" + port);
 
             }
         }
@@ -756,9 +871,11 @@ int main(int argc, char* argv[]) {
                 if (newPath == "..") {
                     dir = root;
                     std::cout << "\n[ok] changed directory to '" << dir << "' (root)\n\n";
+                    log("info", "Changed directory to '" + dir + "' (root)");
                     continue;
                 } else if (newPath == ".") {
                     std::cout << "\n[ok] stayed in directory '" << dir << "'\n\n";
+                    log("info", "Stayed in directory '" + dir + "'");
                     continue;
                 }
                 if (!(args["path"].get<std::string>().starts_with("/"))) {
@@ -800,6 +917,7 @@ int main(int argc, char* argv[]) {
                 }
                 if (is_path_under(args["src"].get<std::string>(), args["dst"].get<std::string>())) {
                     std::cout << "\n[error] Cannot COPY: source path cannot be inside destination path!\nIt could cause recursive copying or other unintended behavior.\n\n";
+                    log("error", "Cannot COPY: source path cannot be inside destination path!");
                     continue; 
                 }
             } else if (CMD == "DOWNLOAD") {
@@ -813,6 +931,7 @@ int main(int argc, char* argv[]) {
                 if (!fs::exists(local_path) || !fs::is_directory(local_path)) {
                     std::cout << "\n[warning] Local path '" << local_path 
                             << "' must be an existing directory!\n\n";
+                    log("warning", "Local path '" + local_path + "' must be an existing directory!");
                     continue; 
                 }
 
@@ -825,6 +944,7 @@ int main(int argc, char* argv[]) {
                 if (fs::exists(local_path + "/" + filename)) {
                     std::cout << "\n[warning] File '" << local_path + "/" + filename 
                             << "' already exists locally! Download aborted to prevent overwrite.\n\n";
+                    log("warning", "File '" + local_path + "/" + filename + "' already exists locally! Download aborted to prevent overwrite.");
                     continue; 
                 }
                 /* std::cout << "\n[info] Will download '" << args["remote"] 
@@ -842,6 +962,7 @@ int main(int argc, char* argv[]) {
                 if (!fs::exists(local_path) || fs::is_directory(local_path)) {
                     std::cout << "\n[warning] Local path '" << local_path 
                             << "' must be an existing file!\n\n";
+                    log("warning", "Local path '" + local_path + "' must be an existing file!");
                     continue; 
                 }
 
@@ -857,6 +978,7 @@ int main(int argc, char* argv[]) {
                 } 
                 if (is_path_under(args["local"].get<std::string>(), args["remote"].get<std::string>())) {
                     std::cout << "\n[error] Cannot SYNC: remote path cannot be inside local path!\nIt could cause recursive copying or other unintended behavior.\n\n";
+                    log("error", "Cannot SYNC: remote path cannot be inside local path!");
                     continue; 
                 }
 
@@ -864,6 +986,7 @@ int main(int argc, char* argv[]) {
                 if (!fs::exists(local_path) || !fs::is_directory(local_path)) {
                     std::cout << "\n[warning] Local path '" << local_path 
                             << "' must be an existing directory!\n\n";
+                    log("warning", "Local path '" + local_path + "' must be an existing directory!");
                     continue; 
                 }
 
@@ -885,8 +1008,10 @@ int main(int argc, char* argv[]) {
 
                     if (msg.empty()) {
                         std::cout << "\n[ok] OK\n\nadresár je prázdny\n\n";
+                        log("info", "Directory is empty");
                     } else {
                         std::cout << "\n[ok] OK\n\n";
+                        log("info", "Directory listing received");
 
                         try {
                             // 🔹 Skús parse-nuť obsah "data" (je to string, ale vo formáte JSON)
@@ -914,67 +1039,82 @@ int main(int argc, char* argv[]) {
                             } else {
                                 // Ak to nie je pole, vypíš ako text
                                 std::cout << msg << "\n";
+                                log("error", msg);
                             }
                         } catch (const std::exception& e) {
                             // 🔹 Ak to nie je validný JSON, vypíš ako obyčajný text
                             std::cout << msg << "\n";
+                            log("error", msg);
                         }
                     }
                 } else {
                     std::cout << "\n[error]\n"
                             << resp.value("data", "") << "\n\n";
+                    log("error", resp.value("data", ""));
                 }
             }
             else if (CMD == "CD") {
                 if (resp.value("status", "ERROR") == "OK") {
                     dir = args["path"].get<std::string>();
                     std::cout << "\n[ok] changed directory to '" << dir << "'\n\n";
+                    log("info", "Changed directory to '" + dir + "'");
                 } else {
                     std::cout << "\n[error] failed to change directory to '" << args["path"].get<std::string>() << "'\n"
                     << "Reason: " << resp.value("message", "") << "\n\n";
+                    log("error", "Failed to change directory to '" + args["path"].get<std::string>() + "': " + resp.value("message", ""));
                 }
             }
             else if (CMD == "MKDIR") {
                 if (resp.value("status", "ERROR") == "OK") {
                     std::cout << "\n[ok] directory created: '" << args["path"].get<std::string>() << "'\n\n";
+                    log("info", "Directory created: '" + args["path"].get<std::string>() + "'");
                 } else {
                     std::cout << "\n[error] failed to create directory '" << args["path"].get<std::string>() << "'\n"
                     << "Reason: " << resp.value("message", "") << "\n\n";
+                    log("error", "Failed to create directory '" + args["path"].get<std::string>() + "': " + resp.value("message", ""));
                 }
             }
             else if (CMD == "RMDIR") {
 
                 if (resp.value("status", "ERROR") == "OK") {
                     std::cout << "\n[ok] directory removed: '" << args["path"].get<std::string>() << "'\n\n";
+                    log("info", "Directory removed: '" + args["path"].get<std::string>() + "'");
                 } else {
                     std::cout << "\n[error] failed to remove directory '" << args["path"].get<std::string>() << "'\n"
                     << "Reason: " << resp.value("message", "") << "\n\n";
+                    log("error", "Failed to remove directory '" + args["path"].get<std::string>() + "': " + resp.value("message", ""));
                 }
             }
             else if (CMD == "DELETE") {
                 if (resp.value("status", "ERROR") == "OK") {
                     std::cout << "\n[ok] file deleted: '" << args["path"].get<std::string>() << "'\n\n";
+                    log("info", "File deleted: '" + args["path"].get<std::string>() + "'");
                 } else {
                     std::cout << "\n[error] failed to delete file '" << args["path"].get<std::string>() << "'\n"
                     << "Reason: " << resp.value("message", "") << "\n\n";
+                    log("error", "Failed to delete file '" + args["path"].get<std::string>() + "': " + resp.value("message", ""));
                 }
             } else if (CMD == "MOVE") {
                 if (resp.value("status", "ERROR") == "OK") {
                     std::cout << "\n[ok] moved/renamed from '" << args["src"].get<std::string>()
                               << "' to '" << args["dst"].get<std::string>() << "'\n\n";
+                    log("info", "Moved/renamed from '" + args["src"].get<std::string>() + "' to '" + args["dst"].get<std::string>() + "'");
                 } else {
                     std::cout << "\n[error] failed to move/rename from '" << args["src"].get<std::string>()
                               << "' to '" << args["dst"].get<std::string>() << "'\n"
                               << "Reason: " << resp.value("message", "") << "\n\n";
+                    log("error", "Failed to move/rename from '" + args["src"].get<std::string>() + "' to '" + args["dst"].get<std::string>() + "': " + resp.value("message", ""));
                 }
             } else if (CMD == "COPY") {
                 if (resp.value("status", "ERROR") == "OK") {
                     std::cout << "\n[ok] copied from '" << args["src"].get<std::string>()
                               << "' to '" << args["dst"].get<std::string>() << "'\n\n";
+                    log("info", "Copied from '" + args["src"].get<std::string>() + "' to '" + args["dst"].get<std::string>() + "'");
                 } else {
                     std::cout << "\n[error] failed to copy from '" << args["src"].get<std::string>()
                               << "' to '" << args["dst"].get<std::string>() << "'\n"
                               << "Reason: " << resp.value("message", "") << "\n\n";
+                    log("error", "Failed to copy from '" + args["src"].get<std::string>() + "' to '" + args["dst"].get<std::string>() + "': " + resp.value("message", ""));
                 }
             } else if (CMD == "DOWNLOAD") {
                 if (resp.value("status", "ERROR") == "OK") {
@@ -993,6 +1133,7 @@ int main(int argc, char* argv[]) {
                     std::ofstream out(out_path, std::ios::binary);
                     if (!out.is_open()) {
                         std::cout << "[error] cannot open local file for writing: " << out_path << "\n";
+                        log("error", "Cannot open local file for writing: " + out_path);
                         continue;
                     }
 
@@ -1003,6 +1144,7 @@ int main(int argc, char* argv[]) {
                         nlohmann::json header;
                         if (!recv_json(sock, header)) {
                             std::cout << "[error] failed to receive header for chunk " << i << "\n";
+                            log("error", "Failed to receive header for chunk " + std::to_string(i));
                             break;
                         }
 
@@ -1019,6 +1161,7 @@ int main(int argc, char* argv[]) {
                             if (ec) {
                                 std::cout << "[error] socket read error during chunk " << chunk_index
                                         << ": " << ec.message() << "\n";
+                                log("error", "Socket read error during chunk " + std::to_string(chunk_index) + ": " + ec.message());
                                 break;
                             }
                             bytes_read_total += n;
@@ -1027,6 +1170,7 @@ int main(int argc, char* argv[]) {
                         if (bytes_read_total != bytes_expected) {
                             std::cout << "[warning] incomplete chunk " << chunk_index
                                     << " (" << bytes_read_total << "/" << bytes_expected << ")\n";
+                            log("warning", "Incomplete chunk " + std::to_string(chunk_index) + " (" + std::to_string(bytes_read_total) + "/" + std::to_string(bytes_expected) + ")");
                         }
 
                         // zapíš chunk
@@ -1053,16 +1197,19 @@ int main(int argc, char* argv[]) {
                     std::cout << "\n\n[ok] Download completed successfully -> " << out_path << "\n\n";
                     std::cout << "[info] Total time: " << std::fixed << std::setprecision(2) << seconds << " s"
                                     << " (" << speed_mb_s << " MB/s, " << speed_mbps << " Mbit/s)\n\n";
+                    log("info", "Download completed successfully -> " + out_path);
                 } 
                 else {
                     std::cout << "\n[error] failed to download remote '" << args["remote"].get<std::string>()
                               << "' to local '" << args["local"].get<std::string>() << "'\n"
                               << "Reason: " << resp.value("message", "") << "\n\n";
+                    log("error", "Failed to download remote '" + args["remote"].get<std::string>() + "' to local '" + args["local"].get<std::string>() + "': " + resp.value("message", ""));
                 }
             } else if (CMD == "UPLOAD") {
                 if (resp.value("status", "") != "OK") {
                     std::cout << "\n[error] server rejected upload: "
                             << resp.value("message", "") << "\n\n";
+                    log("error", "Server rejected upload: " + resp.value("message", ""));
                     continue;
                 }
                 const size_t CHUNK_SIZE = 64 * 1024; // 64 KB chunky
@@ -1093,10 +1240,12 @@ int main(int argc, char* argv[]) {
                 if (resp.value("status", "") != "OK") {
                     std::cout << "\n[error] server rejected upload: "
                             << resp.value("message", "") << "\n\n";
+                    log("error", "Server rejected upload: " + resp.value("message", ""));
                     file.close();
                     continue;
                 } else {
                     std::cout << "[info] Server accepted upload. Sending data...\n\n";
+                    log("info", "Server accepted upload. Sending data...");
                 }
 
                 int64_t sent_total = 0;
@@ -1121,6 +1270,7 @@ int main(int argc, char* argv[]) {
                     nlohmann::json ack;
                     if (!recv_json(sock, ack)) {
                         std::cout << "\n\n[error] failed to receive ack for chunk " << i << "\n";
+                        log("error", "Failed to receive ack for chunk " + std::to_string(i));
                         err = 1;
                         break;
                     }
@@ -1128,6 +1278,7 @@ int main(int argc, char* argv[]) {
                     if (status != "OK") {
                         std::cout << "[error] server reported error for chunk " << i << ": "
                                 << ack.value("message", "") << "\n";
+                        log("error", "Server reported error for chunk " + std::to_string(i) + ": " + ack.value("message", ""));
                         err = 1;
                         break;
                     }
@@ -1151,6 +1302,7 @@ int main(int argc, char* argv[]) {
                     std::cout << "\n\n[ok] Upload completed successfully -> " << (fs::path(args["remote"].get<std::string>()) / fs::path(args["local"].get<std::string>()).filename().string()).string() << "\n\n";
                     std::cout << "[info] Total time: " << std::fixed << std::setprecision(2) << seconds << " s"
                                     << " (" << speed_mb_s << " MB/s, " << speed_mbps << " Mbit/s)\n\n";
+                    log("info", "Upload completed successfully -> " + (fs::path(args["remote"].get<std::string>()) / fs::path(args["local"].get<std::string>()).filename().string()).string());
                 } else {
                     send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "Upload interrupted"}});
                 }
@@ -1159,6 +1311,7 @@ int main(int argc, char* argv[]) {
                 if (resp.value("status", "") != "OK") {
                     std::cout << "[error] Server error: "
                             << resp.value("message", "unknown error") << "\n";
+                    log("error", "Server error: " + resp.value("message", "unknown error"));
                     continue;
                 }
                 auto sync_start = std::chrono::steady_clock::now();
@@ -1351,6 +1504,7 @@ int main(int argc, char* argv[]) {
                                 << " -> " << remote_dir_for_file << "\n";
                     } else {
                         std::cout << "[error] upload FAILED for " << local_full << "\n";
+                        log("error", "Upload failed for " + local_full.string());
                     }
                 }
 
@@ -1370,6 +1524,7 @@ int main(int argc, char* argv[]) {
                 }
 
                 std::cout << "\n[info] Synchronization finished.\n";
+                log("info", "Synchronization finished. Skipped " + std::to_string(skipped_files.size()) + " file(s).");
 
                 auto sync_end = std::chrono::steady_clock::now();
                 std::chrono::duration<double> elapsed = sync_end - sync_start;
@@ -1417,8 +1572,11 @@ int main(int argc, char* argv[]) {
         }
 
         std::cout << "[client] disconnecting ...\n\n";
+        log("info", "client disconnected");
+        sock.close();
     } catch (const std::exception& e) {
         std::cerr << "[error] fatal: " << e.what() << "\n";
+        log("error", std::string("Fatal error: ") + e.what());
         return 1;
     }
 }
