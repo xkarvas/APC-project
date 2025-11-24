@@ -705,9 +705,9 @@ int main(int argc, char* argv[]) {
 
     //std::cout << "User: " << user << ", Host: " << host << "\n";
 
-    // std::signal(SIGINT, handle_signal);
-    // std::signal(SIGTERM, handle_signal);
-    // std::signal(SIGQUIT, handle_signal);
+    std::signal(SIGINT, handle_signal);
+    std::signal(SIGTERM, handle_signal);
+    std::signal(SIGQUIT, handle_signal);
     try {
         asio::io_context io;
         tcp::resolver r(io);
@@ -807,6 +807,38 @@ int main(int argc, char* argv[]) {
 
             } else {
                 std::cout << "Private mode. Registration.\n\n";
+
+                while (true) {
+                    std::cout << "User '" << user
+                            << "' not found. Register? (y/n): " << std::flush;
+
+                    std::string answer;
+                    if (!std::getline(std::cin, answer)) {
+                        std::cerr << "\n[input] aborted while waiting for answer.\n";
+                        return 1;
+                    }
+
+                    // odstráň medzery
+                    answer.erase(std::remove_if(answer.begin(), answer.end(),
+                                                [](unsigned char c){ return std::isspace(c); }),
+                                answer.end());
+
+                    if (!answer.empty()) {
+                        char c = static_cast<char>(
+                            std::tolower(static_cast<unsigned char>(answer[0]))
+                        );
+                        if (c == 'y') {
+                            std::cout << "\n[info] Proceeding with registration...\n\n";
+                            break; // pokračuj na zadanie hesla
+                        }
+                        if (c == 'n') {
+                            std::cout << "\n[info] Registration cancelled. Exiting.\n";
+                            return 0; // aplikácia skončí
+                        }
+                    }
+
+                    std::cout << "[warning] Please answer 'y' or 'n'.\n\n";
+                }
                 
                 std::string pw;
                 std::cout << "Your new password: " << std::flush;
@@ -1168,16 +1200,20 @@ int main(int argc, char* argv[]) {
             } else if (CMD == "DOWNLOAD") {
                 if (resp.value("status", "ERROR") == "OK") {
                     std::cout << "\n[ok] downloaded remote '" << args["remote"].get<std::string>()
-                              << "' to local '" << args["local"].get<std::string>() << "' as '" << args["filename"].get<std::string>() << "'\n";
-                    std::cout << "\n[info] Starting download file '" << args["remote"].get<std::string>() << "' of size " << resp.value("size", 0) << " bytes in " << resp.value("total_chunks", 0) << " chunks.\n\n";
-                            // --- 🔹 prijímanie chunkov po potvrdení OK ---
-                    int64_t file_size = resp.value("size", 0);
-                    int64_t chunk_size = resp.value("chunk_size", 0);
+                            << "' to local '" << args["local"].get<std::string>() << "' as '"
+                            << args["filename"].get<std::string>() << "'\n";
+                    std::cout << "\n[info] Starting download file '"
+                            << args["remote"].get<std::string>() << "' of size "
+                            << resp.value("size", 0) << " bytes in "
+                            << resp.value("total_chunks", 0) << " chunks.\n\n";
+
+                    int64_t file_size    = resp.value("size", 0);
+                    int64_t chunk_size   = resp.value("chunk_size", 0);
                     int64_t total_chunks = resp.value("total_chunks", 0);
 
                     std::string local_dir = args["local"].get<std::string>();
-                    std::string filename = args["filename"].get<std::string>();
-                    std::string out_path = (fs::path(local_dir) / filename).string();
+                    std::string filename  = args["filename"].get<std::string>();
+                    std::string out_path  = (fs::path(local_dir) / filename).string();
 
                     std::ofstream out(out_path, std::ios::binary);
                     if (!out.is_open()) {
@@ -1186,90 +1222,136 @@ int main(int argc, char* argv[]) {
                         continue;
                     }
 
-                    auto start_time = std::chrono::steady_clock::now();
-
+                    auto   start_time     = std::chrono::steady_clock::now();
                     int64_t received_total = 0;
+                    bool   download_error  = false;   // či sa download nepodaril (aj kvôli Ctrl+C)
 
                     for (int64_t i = 0; i < total_chunks; ++i) {
+
+                        // užívateľ stlačil Ctrl+C
+                        if (g_interrupted.load(std::memory_order_relaxed)) {
+                            std::cout << "\n\n[error] download interrupted by user (Ctrl+C)";
+                            log("error", "Download interrupted by user (Ctrl+C)", CMD);
+                            download_error = true;
+                            break;
+                        }
+
                         nlohmann::json header;
                         if (!recv_json(sock, header)) {
                             std::cout << "[error] failed to receive header for chunk " << i << "\n";
                             log("error", "Failed to receive header for chunk " + std::to_string(i), CMD);
+                            download_error = true;
                             break;
                         }
 
-                        int64_t chunk_index = header.value("chunk_index", 0);
+                        int64_t chunk_index    = header.value("chunk_index", 0);
                         int64_t bytes_expected = header.value("size", 0);
 
                         std::vector<char> buffer(bytes_expected);
                         asio::error_code ec;
                         int64_t bytes_read_total = 0;
+
                         while (bytes_read_total < bytes_expected) {
-                            int64_t n = sock.read_some(asio::buffer(buffer.data() + bytes_read_total,
-                                                                bytes_expected - bytes_read_total), ec);
+
+                            if (g_interrupted.load(std::memory_order_relaxed)) {
+                                std::cout << "\n[error] download interrupted by user (Ctrl+C)\n";
+                                log("error", "Download interrupted by user (Ctrl+C) in middle of chunk", CMD);
+                                download_error = true;
+                                break;
+                            }
+
+                            int64_t n = sock.read_some(
+                                asio::buffer(buffer.data() + bytes_read_total,
+                                            bytes_expected - bytes_read_total),
+                                ec
+                            );
                             if (ec) {
-                                std::cout << "[error] socket read error during chunk " << chunk_index
-                                        << ": " << ec.message() << "\n";
-                                log("error", "Socket read error during chunk " + std::to_string(chunk_index) + ": " + ec.message(), CMD);
-                                nlohmann::json nack = {{"nack", static_cast<int32_t>(chunk_index)}, {"status", "ERROR"}};
+                                std::cout << "[error] socket read error during chunk "
+                                        << chunk_index << ": " << ec.message() << "\n";
+                                log("error", "Socket read error during chunk " +
+                                            std::to_string(chunk_index) + ": " + ec.message(), CMD);
+                                nlohmann::json nack = {{"nack", static_cast<int32_t>(chunk_index)},
+                                                    {"status", "ERROR"}};
                                 send_json(sock, nack);
-                                i--;
-                                continue;
+                                download_error = true;
+                                break;
                             }
                             bytes_read_total += n;
                         }
-                        
-                        
-                        // std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+
+                        if (download_error) {
+                            break;
+                        }
 
                         if (bytes_read_total != bytes_expected) {
                             std::cout << "[error] incomplete chunk " << chunk_index
                                     << " (" << bytes_read_total << "/" << bytes_expected << ")\n";
-                            log("error", "Incomplete chunk " + std::to_string(chunk_index) + " (" + std::to_string(bytes_read_total) + "/" + std::to_string(bytes_expected) + ")", CMD);
-                            nlohmann::json nack = {{"nack", static_cast<int32_t>(chunk_index)}, {"status", "ERROR"}};
+                            log("error",
+                                "Incomplete chunk " + std::to_string(chunk_index) + " (" +
+                                std::to_string(bytes_read_total) + "/" +
+                                std::to_string(bytes_expected) + ")", CMD);
+                            nlohmann::json nack = {{"nack", static_cast<int32_t>(chunk_index)},
+                                                {"status", "ERROR"}};
                             send_json(sock, nack);
-
-                            i--;
-                            continue;
+                            download_error = true;
+                            break;
                         }
 
                         out.write(buffer.data(), bytes_read_total);
                         received_total += bytes_read_total;
 
-                        // potvrď chunk serveru
-                        nlohmann::json ack = {{"ack", static_cast<int32_t>(chunk_index)}, {"status", "OK"}};
+                        nlohmann::json ack = {{"ack", static_cast<int32_t>(chunk_index)},
+                                            {"status", "OK"}};
                         send_json(sock, ack);
 
-                        // priebežný výpis
                         double progress = (total_chunks > 0)
                                             ? (100.0 * (i + 1) / static_cast<double>(total_chunks))
                                             : 0.0;
-                        std::cout << "\r[download] chunk " << (i + 1) << "/" << total_chunks
-                                << " (" << std::fixed << std::setprecision(1) << progress << "%)" << std::flush;
+                        std::cout << "\r[download] chunk " << (i + 1) << "/"
+                                << total_chunks << " (" << std::fixed << std::setprecision(1)
+                                << progress << "%)" << std::flush;
                     }
+
                     auto end_time = std::chrono::steady_clock::now();
                     std::chrono::duration<double> elapsed = end_time - start_time;
                     double seconds = elapsed.count();
 
-                    double speed_mbps = (received_total * 8.0) / (seconds * 1024.0 * 1024.0); // v Mbit/s
-                    double speed_mb_s = (received_total / (1024.0 * 1024.0)) / seconds;       // v MB/s
-
                     out.close();
-                    std::cout << "\n\n[ok] Download completed successfully -> " << out_path << "\n\n";
-                    std::cout << "[info] Total time: " << std::fixed << std::setprecision(2) << seconds << " s"
-                                    << " (" << speed_mb_s << " MB/s, " << speed_mbps << " Mbit/s)\n\n";
-                    log("info", "Download completed successfully -> " + out_path, CMD);
-                } 
-                else {
-                    std::cout << "\n[error] failed to download remote '" << args["remote"].get<std::string>()
-                              << "' to local '" << args["local"].get<std::string>() << "'\n"
-                              << "Reason: " << resp.value("message", "") << "\n\n";
-                    log("error", "Failed to download remote '" + args["remote"].get<std::string>() + "' to local '" + args["local"].get<std::string>() + "': " + resp.value("message", ""), CMD);
+
+                    // ak download nedobehol korektne, vymaž rozpracovaný súbor
+                    if (download_error) {
+                        std::error_code ec_rm;
+                        fs::remove(out_path, ec_rm);
+                        std::cout << "[error] Download failed, partial file removed: "
+                                << out_path << "\n";
+                        log("error", "Download failed, partial file removed: " + out_path, CMD);
+                    } else {
+                        double speed_mbps = (received_total * 8.0) /
+                                            (seconds * 1024.0 * 1024.0); // Mbit/s
+                        double speed_mb_s = (received_total / (1024.0 * 1024.0)) / seconds; // MB/s
+
+                        std::cout << "\n\n[ok] Download completed successfully -> "
+                                << out_path << "\n\n";
+                        std::cout << "[info] Total time: " << std::fixed << std::setprecision(2)
+                                << seconds << " s"
+                                << " (" << speed_mb_s << " MB/s, " << speed_mbps
+                                << " Mbit/s)\n\n";
+                        log("info", "Download completed successfully -> " + out_path, CMD);
+                    }
+                } else {
+                    std::cout << "\n[error] failed to download remote '"
+                            << args["remote"].get<std::string>()
+                            << "' to local '" << args["local"].get<std::string>() << "'\n"
+                            << "Reason: " << resp.value("message", "") << "\n\n";
+                    log("error",
+                        "Failed to download remote '" + args["remote"].get<std::string>() +
+                        "' to local '" + args["local"].get<std::string>() +
+                        "': " + resp.value("message", ""), CMD);
                 }
-                        } else if (CMD == "UPLOAD") {
+            } else if (CMD == "UPLOAD") {
                 if (resp.value("status", "") != "OK") {
                     std::cout << "\n[error] server rejected upload: "
-                              << resp.value("message", "") << "\n\n";
+                            << resp.value("message", "") << "\n\n";
                     log("error", "Server rejected upload: " + resp.value("message", ""), CMD);
                     continue;
                 }
@@ -1286,12 +1368,12 @@ int main(int argc, char* argv[]) {
                     continue;
                 }
 
-                int64_t file_size = std::filesystem::file_size(local_path);
+                int64_t file_size    = std::filesystem::file_size(local_path);
                 int64_t total_chunks = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
                 std::cout << "\n[info] Starting upload file '" << local_path
-                          << "' of size " << file_size << " bytes in "
-                          << total_chunks << " chunks.\n\n";
+                        << "' of size " << file_size << " bytes in "
+                        << total_chunks << " chunks.\n\n";
 
                 auto start_time = std::chrono::steady_clock::now();
 
@@ -1306,7 +1388,7 @@ int main(int argc, char* argv[]) {
                 nlohmann::json resp_meta;
                 if (!recv_json(sock, resp_meta) || resp_meta.value("status", "") != "OK") {
                     std::cout << "\n[error] server rejected upload after meta: "
-                              << resp_meta.value("message", "") << "\n\n";
+                            << resp_meta.value("message", "") << "\n\n";
                     log("error", "Server rejected upload after meta: " + resp_meta.value("message", ""), CMD);
                     file.close();
                     continue;
@@ -1320,7 +1402,15 @@ int main(int argc, char* argv[]) {
                 std::vector<char> buffer(CHUNK_SIZE);
 
                 for (int64_t i = 0; i < total_chunks && !err; ) {
-                    int64_t offset = i * CHUNK_SIZE;
+
+                    if (g_interrupted.load(std::memory_order_relaxed)) {
+                        std::cout << "\n\n[error] upload interrupted by signal (Ctrl+C)\n";
+                        log("error", "Upload interrupted by signal (Ctrl+C)", CMD);
+                        err = 1;
+                        break;
+                    }
+
+                    int64_t offset        = i * CHUNK_SIZE;
                     int64_t bytes_to_send = std::min<int64_t>(CHUNK_SIZE, file_size - offset);
 
                     file.seekg(offset, std::ios::beg);
@@ -1328,7 +1418,7 @@ int main(int argc, char* argv[]) {
                     std::streamsize bytes_read = file.gcount();
 
                     if (bytes_read <= 0) {
-                        std::cout << "\n[error] nothing read from file for chunk " << i << "\n";
+                        std::cout << "[error] nothing read from file for chunk " << i << "\n";
                         log("error", "Nothing read from file for chunk " + std::to_string(i), CMD);
                         err = 1;
                         break;
@@ -1341,6 +1431,14 @@ int main(int argc, char* argv[]) {
 
                     int retry = 0;
                     while (true) {
+
+                        if (g_interrupted.load(std::memory_order_relaxed)) {
+                            std::cout << "\n\n[error] upload interrupted by signal (Ctrl+C)\n";
+                            log("error", "Upload interrupted by signal (Ctrl+C)", CMD);
+                            err = 1;
+                            break;
+                        }
+
                         send_json(sock, header);
                         asio::write(sock, asio::buffer(buffer.data(), bytes_read));
 
@@ -1350,9 +1448,15 @@ int main(int argc, char* argv[]) {
                         set_socket_recv_timeout(sock, 0);
 
                         if (!got) {
-                            std::cout << "\n[error] timeout or disconnect while waiting for ACK of chunk "
-                                      << i << "\n";
-                            log("error", "Timeout or disconnect while waiting for ACK of chunk " + std::to_string(i), CMD);
+                            if (g_interrupted.load(std::memory_order_relaxed)) {
+                                std::cout << "[error] upload interrupted by signal (Ctrl+C)\n";
+                                log("error", "Upload interrupted by signal (Ctrl+C) while waiting for ACK", CMD);
+                            } else {
+                                std::cout << "\n[error] timeout or disconnect while waiting for ACK of chunk "
+                                        << i << "\n";
+                                log("error", "Timeout or disconnect while waiting for ACK of chunk " +
+                                            std::to_string(i), CMD);
+                            }
                             err = 1;
                             break;
                         }
@@ -1369,30 +1473,31 @@ int main(int argc, char* argv[]) {
                                 : 0.0;
 
                             std::cout << "\r[upload] chunk " << (i + 1) << "/"
-                                      << total_chunks << " ("
-                                      << std::fixed << std::setprecision(1)
-                                      << progress << "%)" << std::flush;
+                                    << total_chunks << " ("
+                                    << std::fixed << std::setprecision(1)
+                                    << progress << "%)" << std::flush;
 
                             ++i;
                             break;
                         } else if (st == "ERROR" && nack_i == i) {
                             std::cout << "\n[error] server NACK for chunk " << i
-                                      << " – resending...\n";
+                                    << " – resending...\n";
                             log("error", "Server NACK for chunk " + std::to_string(i), CMD);
                             if (++retry >= 3) {
                                 std::cout << "[error] chunk " << i
-                                          << " NACKed too many times, aborting upload\n";
-                                log("error", "Chunk " + std::to_string(i) + " NACKed too many times, aborting upload", CMD);
+                                        << " NACKed too many times, aborting upload\n";
+                                log("error", "Chunk " + std::to_string(i) +
+                                            " NACKed too many times, aborting upload", CMD);
                                 err = 1;
                                 break;
                             }
                         } else {
                             std::cout << "\n[error] invalid ACK/NACK for chunk " << i
-                                      << " from server (status=" << st
-                                      << ", ack=" << ack_i
-                                      << ", nack=" << nack_i << ")\n";
+                                    << " from server (status=" << st
+                                    << ", ack=" << ack_i
+                                    << ", nack=" << nack_i << ")\n";
                             log("error", "Invalid ACK/NACK for chunk " + std::to_string(i)
-                                         + " from server", CMD);
+                                        + " from server", CMD);
                             err = 1;
                             break;
                         }
@@ -1408,19 +1513,19 @@ int main(int argc, char* argv[]) {
 
                 file.close();
 
-                if (!err) {
+                if (!err && !g_interrupted.load(std::memory_order_relaxed)) {
                     std::string remote_full =
                         (fs::path(args["remote"].get<std::string>()) /
-                         fs::path(args["local"].get<std::string>()).filename()).string();
+                        fs::path(args["local"].get<std::string>()).filename()).string();
 
                     std::cout << "\n\n[ok] Upload completed successfully -> " << remote_full << "\n\n";
                     std::cout << "[info] Total time: " << std::fixed << std::setprecision(2)
-                              << seconds << " s"
-                              << " (" << speed_mb_s << " MB/s, " << speed_mbps << " Mbit/s)\n\n";
+                            << seconds << " s"
+                            << " (" << speed_mb_s << " MB/s, " << speed_mbps << " Mbit/s)\n\n";
                     log("info", "Upload completed successfully -> " + remote_full, CMD);
                 } else {
                     send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "Upload interrupted"}});
-                    std::cout << "\n[error] Upload interrupted\n\n";
+                    std::cout << "[error] Upload interrupted";
                     log("error", "Upload interrupted", CMD);
                 }
             } else if (CMD == "SYNC") {
@@ -1689,11 +1794,11 @@ int main(int argc, char* argv[]) {
         }
 
         if (g_interrupted.load(std::memory_order_relaxed)) {
-            std::cerr << "\n[error] client interrupted by signal (SIGINT/SIGTERM/SIGQUIT)\n";
+            std::cerr << "[error] client interrupted by signal (SIGINT/SIGTERM/SIGQUIT)\n";
             log("error", "Client interrupted by signal (SIGINT/SIGTERM/SIGQUIT)");
         }
 
-        std::cout << "[client] disconnecting ...\n\n";
+        std::cout << "\n[client] disconnecting ...\n\n";
         log("info", "client disconnected");
         sock.close();
     } catch (const std::exception& e) {

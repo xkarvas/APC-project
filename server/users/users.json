@@ -13,6 +13,13 @@
       "registered_at": "2025-11-22T20:22:53Z",
       "salt": "ajLNfE7BBJxy6eD14Tdcpg",
       "user": "hello"
+    },
+    "test": {
+      "last_login_at": "2025-11-24T18:44:14Z",
+      "password_hash": "b8bc82c550b82d6c198eebfe63ab4b1ab63e48f8c0e5d22d23b1d8b25a9833a4",
+      "registered_at": "2025-11-24T18:44:14Z",
+      "salt": "Hmey7Tu5SWOqJTuA7_FLYw",
+      "user": "test"
     }
   }
 }

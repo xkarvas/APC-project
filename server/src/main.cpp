@@ -906,7 +906,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     int64_t chunk_size  = chunk_header.value("size", 0);
 
                     if (chunk_index != i || chunk_size <= 0) {
-                        std::cout << "[error] " << endpoint_str(sock)
+                        std::cout << "\n[error] " << endpoint_str(sock)
                                 << " invalid chunk header for chunk " << i
                                 << " — NACK\n";
                         send_json(sock, {{"status", "ERROR"}, {"nack", i}});
