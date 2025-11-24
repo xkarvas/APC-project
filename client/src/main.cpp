@@ -14,6 +14,8 @@
 #include <regex>
 #include <sodium.h>
 #include <sstream>
+#include <csignal>
+#include <atomic>
 
 #include <filesystem>
 namespace fs = std::filesystem;
@@ -553,7 +555,12 @@ void build_local_index(const fs::path& root_dir,
     }
 }
 
+static std::atomic_bool g_interrupted{false};
 
+void handle_signal(int)
+{
+    g_interrupted.store(true, std::memory_order_relaxed);
+}
 
 
 int main(int argc, char* argv[]) {
@@ -661,7 +668,9 @@ int main(int argc, char* argv[]) {
 
     //std::cout << "User: " << user << ", Host: " << host << "\n";
 
-
+    std::signal(SIGINT, handle_signal);
+    std::signal(SIGTERM, handle_signal);
+    std::signal(SIGQUIT, handle_signal);
     try {
         asio::io_context io;
         tcp::resolver r(io);
@@ -816,6 +825,9 @@ int main(int argc, char* argv[]) {
 
         std::string line;
         while (true) {
+            if (g_interrupted.load(std::memory_order_relaxed)) {
+                break;
+            }
             std::cout << "> ";
             if (!std::getline(std::cin, line)) break;
             if (line.empty()) continue;
@@ -834,7 +846,6 @@ int main(int argc, char* argv[]) {
             if (CMD == "EXIT" || CMD == "QUIT" || CMD == "E" || CMD == "Q") {
                 break;
             }
-            // HELP (globálny aj HELP <cmd>)
             if (CMD == "HELP") {
                 if (toks.size() == 1) { print_help_all(); continue; }
                 std::string which = to_upper(toks[1]);
@@ -842,7 +853,6 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
-            // validácia počtu argov podľa <> / []
             size_t min_req=0, max_all=0;
             std::string usage;
             size_t have = (toks.size() >= 2) ? (toks.size()-1) : 0;
@@ -852,7 +862,6 @@ int main(int argc, char* argv[]) {
                 continue;
             }
 
-            // Naplnenie args (s defaultmi pre voliteľné)
             nlohmann::json args = nlohmann::json::object();
 
             if (CMD == "LIST") {
@@ -1154,7 +1163,6 @@ int main(int argc, char* argv[]) {
                         int64_t chunk_index = header.value("chunk_index", 0);
                         int64_t bytes_expected = header.value("size", 0);
 
-                        // --- čítaj presne bytes_expected bajtov ---
                         std::vector<char> buffer(bytes_expected);
                         asio::error_code ec;
                         int64_t bytes_read_total = 0;
@@ -1165,18 +1173,25 @@ int main(int argc, char* argv[]) {
                                 std::cout << "[error] socket read error during chunk " << chunk_index
                                         << ": " << ec.message() << "\n";
                                 log("error", "Socket read error during chunk " + std::to_string(chunk_index) + ": " + ec.message(), CMD);
-                                break;
+                                nlohmann::json nack = {{"nack", static_cast<int32_t>(chunk_index)}, {"status", "ERROR"}};
+                                send_json(sock, nack);
+                                i--;
+                                continue;
                             }
                             bytes_read_total += n;
                         }
 
                         if (bytes_read_total != bytes_expected) {
-                            std::cout << "[warning] incomplete chunk " << chunk_index
+                            std::cout << "[error] incomplete chunk " << chunk_index
                                     << " (" << bytes_read_total << "/" << bytes_expected << ")\n";
-                            log("warning", "Incomplete chunk " + std::to_string(chunk_index) + " (" + std::to_string(bytes_read_total) + "/" + std::to_string(bytes_expected) + ")", CMD);
+                            log("error", "Incomplete chunk " + std::to_string(chunk_index) + " (" + std::to_string(bytes_read_total) + "/" + std::to_string(bytes_expected) + ")", CMD);
+                            nlohmann::json nack = {{"nack", static_cast<int32_t>(chunk_index)}, {"status", "ERROR"}};
+                            send_json(sock, nack);
+
+                            i--;
+                            continue;
                         }
 
-                        // zapíš chunk
                         out.write(buffer.data(), bytes_read_total);
                         received_total += bytes_read_total;
 
@@ -1574,6 +1589,11 @@ int main(int argc, char* argv[]) {
                     std::cout << "\n[error] " << message << "\n\n";
                 }
             }
+        }
+
+        if (g_interrupted.load(std::memory_order_relaxed)) {
+            std::cerr << "\n[error] client interrupted by signal (SIGINT/SIGTERM/SIGQUIT)\n";
+            log("error", "Client interrupted by signal (SIGINT/SIGTERM/SIGQUIT)");
         }
 
         std::cout << "[client] disconnecting ...\n\n";

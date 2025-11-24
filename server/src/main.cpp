@@ -15,6 +15,8 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <csignal>
+#include <atomic>
 
 
 #include <filesystem>
@@ -685,26 +687,24 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     std::streamsize bytes_read = file.gcount();
                     if (bytes_read <= 0) break;
 
-                    // hlavička pre chunk
                     nlohmann::json header = {
                         {"chunk_index", static_cast<int64_t>(i)},
                         {"size", static_cast<int64_t>(bytes_read)}
                     };
                     send_json(sock, header);
 
-                    // Pošli dáta chunku
                     asio::write(sock, asio::buffer(buffer, bytes_read));
 
-                    // Čakaj na potvrdenie od klienta
                     nlohmann::json ack;
                     if (!recv_json(sock, ack)) {
-                        std::cout << "[error] " << sock.remote_endpoint() << " client disconnected during download.\n";
+                        std::cout << "\n[error] " << sock.remote_endpoint() << " client disconnected during download.\n";
                         break;
                     }
 
                     if (ack.value("status", "") != "OK" || ack.value("ack", -1) != (int)i) {
-                        std::cout << "[error] " << sock.remote_endpoint() << " invalid ACK for chunk " << i << " — aborting download.\n";
-                        break;
+                        std::cout << "\n[error] " << sock.remote_endpoint() << " invalid ACK for chunk " << i << " — try again.\n";
+                        i--;
+                        continue;
                     }
 
                     double progress = (file_size > 0)
@@ -867,6 +867,14 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
     std::cout << "[server] client " << sock.remote_endpoint() << " disconnected\n";
 }
 
+
+static std::atomic_bool g_terminate{false};
+
+void handle_signal(int)
+{
+    g_terminate.store(true, std::memory_order_relaxed);
+}
+
 int main(int argc, char* argv[]) {
     int port = 5050;
     fs::path root = ".";
@@ -930,6 +938,10 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
+    std::signal(SIGINT,  handle_signal);   
+    std::signal(SIGTERM, handle_signal);   
+    std::signal(SIGQUIT, handle_signal); 
+
     // 4) Spustenie servera
     std::cout << "[server] starting...\n";
 
@@ -941,11 +953,26 @@ int main(int argc, char* argv[]) {
         asio::io_context io;
         tcp::acceptor acc(io, tcp::endpoint(tcp::v4(), (unsigned short)port)); // 0.0.0.0:<port>
 
-        while (true) {
+        while (!g_terminate.load(std::memory_order_relaxed)) {
             tcp::socket sock(io);
-            acc.accept(sock);                             // blokujúci accept
-            std::thread(handle_client, std::move(sock), root).detach(); // vlákno na klienta
+            asio::error_code ec;
+            acc.accept(sock, ec); // môže byť prerušený signálom
+
+            if (g_terminate.load(std::memory_order_relaxed)) {
+                break;
+            }
+
+            if (ec) {
+                std::cerr << "[server] accept error: " << ec.message() << "\n";
+                continue;
+            }
+
+            std::thread(handle_client, std::move(sock), root).detach();
         }
+
+        asio::error_code ignore;
+        acc.close(ignore);
+        std::cout << "[server] shutting down (signal)\n";
     } catch (const std::exception& e) {
         std::cerr << "[server] fatal: " << e.what() << "\n";
         return 1;
