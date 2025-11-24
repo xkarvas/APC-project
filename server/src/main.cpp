@@ -19,11 +19,58 @@
 #include <atomic>
 
 
+#if defined(_WIN32)
+#include <winsock2.h>
+#else
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#endif
+
+
 #include <filesystem>
 namespace fs = std::filesystem;
 
 using asio::ip::tcp;
 
+static std::string endpoint_str(const tcp::socket& sock) {
+    asio::error_code ec;
+    auto ep = sock.remote_endpoint(ec);
+    if (ec) {
+        return "";
+    }
+    std::ostringstream oss;
+    oss << ep;
+    return oss.str();
+}
+
+static bool set_socket_recv_timeout(tcp::socket& sock, int seconds)
+{
+#if defined(_WIN32)
+    DWORD timeout = (seconds > 0) ? seconds * 1000 : 0;
+    if (setsockopt(sock.native_handle(),
+                   SOL_SOCKET,
+                   SO_RCVTIMEO,
+                   reinterpret_cast<const char*>(&timeout),
+                   sizeof(timeout)) != 0) {
+        return false;
+    }
+    return true;
+#else
+    struct timeval tv;
+    tv.tv_sec  = seconds;
+    tv.tv_usec = 0;
+    if (setsockopt(sock.native_handle(),
+                   SOL_SOCKET,
+                   SO_RCVTIMEO,
+                   &tv,
+                   sizeof(tv)) != 0) {
+        return false;
+    }
+    return true;
+#endif
+}
 
 static std::vector<unsigned char> hex_to_vec(const std::string& hex) {
     std::vector<unsigned char> out(hex.size() / 2);
@@ -271,11 +318,11 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
         // authentication phase
         nlohmann::json auth;
         if (!recv_json(sock, auth)) {
-            std::cerr << "[error] " << sock.remote_endpoint() << " auth failed\n";
+            std::cerr << "[error] " << endpoint_str(sock) << " auth failed\n";
             return;
         }
         if (auth.value("cmd", "") != "AUTH") {
-            std::cerr << "[error] " << sock.remote_endpoint() << " auth failed: invalid command\n";
+            std::cerr << "[error] " << endpoint_str(sock) << " auth failed: invalid command\n";
             return;
         } else {
             std::string username = auth.value("username", "");
@@ -283,7 +330,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
             if (username.empty()) {
                 send_json(sock, {{"cmd","AUTH"},{"status","OK"},{"code",0},{"message","Authentication successful"},{"data","Welcome guest"},{"root",root.string()},{"mode","public"}});
-                std::cout << "[info] " << sock.remote_endpoint() << " connect in public mode\n";
+                std::cout << "[info] " << endpoint_str(sock) << " connect in public mode\n";
             } else {
                 std::error_code ec;
                 fs::create_directories("./server/users", ec);
@@ -324,11 +371,11 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     send_json(sock, {{"cmd","AUTH"},{"status","OK"},{"code",0},{"next","LOGIN"},{"salt",db["users"][username]["salt"]}});
 
                     if (!recv_json(sock, auth)) {
-                        std::cerr << "[error] " << sock.remote_endpoint() << " auth failed\n";
+                        std::cerr << "[error] " << endpoint_str(sock) << " auth failed\n";
                         return;
                     }
                     if (auth.value("cmd", "") != "LOGIN") {
-                        std::cerr << "[error] " << sock.remote_endpoint() << " auth failed\n";
+                        std::cerr << "[error] " << endpoint_str(sock) << " auth failed\n";
                         return;
                     }
 
@@ -364,7 +411,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                             {"cmd","LOGIN"},{"status","ERROR"},{"code",1},
                             {"message","Bad credentials"}
                         });
-                        std::cerr << "[error] " << sock.remote_endpoint()
+                        std::cerr << "[error] " << endpoint_str(sock)
                                 << " auth failed - Bad credentials.\n";
                     }
                 } else {
@@ -383,12 +430,12 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     send_json(sock, {{"cmd","AUTH"},{"status","OK"},{"code",0},{"next","REGISTER"},{"salt",salt_b64_str}});
 
                     if (!recv_json(sock, auth)) {
-                        std::cerr << "[error] " << sock.remote_endpoint() << " auth failed\n";
+                        std::cerr << "[error] " << endpoint_str(sock) << " auth failed\n";
                         return;
                     }
 
                     if (auth.value("cmd", "") != "REGISTER") {
-                        std::cerr << "[error] " << sock.remote_endpoint() << " auth failed\n";
+                        std::cerr << "[error] " << endpoint_str(sock) << " auth failed\n";
                         return;
                     }
 
@@ -441,7 +488,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","LIST"},{"status","ERROR"},{"code",2},{"message", "Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " list -> access denied, path: " << path << ", root: " << root << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " list -> access denied, path: " << path << ", root: " << root << "\n";
                     continue;
                 }
 
@@ -472,19 +519,19 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     }
 
                     send_json(sock, {{"cmd","LIST"},{"status","OK"},{"code",0},{"message","LIST command executed"},{"data", files.dump()}});
-                    std::cout << "[ok] " << sock.remote_endpoint() << " list -> " << "path: " << path <<"\n";
+                    std::cout << "[ok] " << endpoint_str(sock) << " list -> " << "path: " << path <<"\n";
 
                 } catch (const std::exception& e) {
                     result = std::string("Error: ") + e.what();
                     send_json(sock, {{"cmd","LIST"},{"status","ERROR"},{"code",1},{"message","LIST command failed"},{"data", result}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " list ->" << result << std::endl;
+                    std::cout << "[error] " << endpoint_str(sock) << " list ->" << result << std::endl;
                 }               // TODO: implement LIST command
             } else if (cmd == "CD") {
                 std::string path = args.value("path", "");
 
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","CD"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " cd -> access denied, path: " << path << ", root: " << root << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " cd -> access denied, path: " << path << ", root: " << root << "\n";
                     continue;
                 }
 
@@ -493,96 +540,96 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         if (std::filesystem::is_directory(path)) {
                             // Je to priečinok
                             send_json(sock, {{"cmd","CD"},{"status","OK"},{"code",0},{"path", path}});
-                            std::cout << "[ok] " << sock.remote_endpoint() << " cd -> ok, changed to '" << path << "'" << "\n";
+                            std::cout << "[ok] " << endpoint_str(sock) << " cd -> ok, changed to '" << path << "'" << "\n";
 
                         } else {
                             send_json(sock, {{"cmd","CD"},{"status","WARNING"},{"code",-1},{"path", path},{"message","Not a directory"}});
-                            std::cout << "[error] " << sock.remote_endpoint() << " cd -> not a directory, path: '" << path << "'\n";
+                            std::cout << "[error] " << endpoint_str(sock) << " cd -> not a directory, path: '" << path << "'\n";
                         }
                     } else {
                         // neexistuje
                         send_json(sock, {{"cmd","CD"},{"status","ERROR"},{"code",1},{"path", path},{"message","Directory does not exist"}});
-                        std::cout << "[error] " << sock.remote_endpoint() << " cd -> directory does not exist, path: '" << path << "'\n";
+                        std::cout << "[error] " << endpoint_str(sock) << " cd -> directory does not exist, path: '" << path << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","CD"},{"status","ERROR"},{"code",1},{"path", path},{"message","Unknown error"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " cd -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " cd -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "MKDIR") {
                 std::string path = args.value("path", "");
 
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","MKDIR"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " mkdir -> access denied, path: " << path << ", root: " << root << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " mkdir -> access denied, path: " << path << ", root: " << root << "\n";
                     continue;
                 }
 
                 try {
                     if (std::filesystem::exists(path)) {
                         send_json(sock, {{"cmd","MKDIR"},{"status","ERROR"},{"code",1},{"message","Directory already exists"}});
-                        std::cout << "[error] " << sock.remote_endpoint() << " mkdir -> directory already exists, path: '" << path << "'\n";
+                        std::cout << "[error] " << endpoint_str(sock) << " mkdir -> directory already exists, path: '" << path << "'\n";
                     } else {
                         std::filesystem::create_directories(path);
                         send_json(sock, {{"cmd","MKDIR"},{"status","OK"},{"code",0},{"message","Directory created"}});
-                        std::cout << "[ok] " << sock.remote_endpoint() << " mkdir -> created directory at '" << path << "'\n";
+                        std::cout << "[ok] " << endpoint_str(sock) << " mkdir -> created directory at '" << path << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","MKDIR"},{"status","ERROR"},{"code",1},{"message","Failed to create directory"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " mkdir -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " mkdir -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "RMDIR") {
                 std::string path = args.value("path", "");
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","RMDIR"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " rmdir -> access denied, path: " << path << ", root: " << root << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " rmdir -> access denied, path: " << path << ", root: " << root << "\n";
                     continue;
                 }
                 try {
                     if (std::filesystem::exists(path)) {
                         if (!std::filesystem::is_directory(path)) {
                             send_json(sock, {{"cmd","RMDIR"},{"status","ERROR"},{"code",1},{"message","Path is not a directory"}});
-                            std::cout << "[error] " << sock.remote_endpoint() << " rmdir -> path is not a directory, path: '" << path << "'\n";
+                            std::cout << "[error] " << endpoint_str(sock) << " rmdir -> path is not a directory, path: '" << path << "'\n";
                             continue;
                         }
                         std::filesystem::remove_all(path);
                         send_json(sock, {{"cmd","RMDIR"},{"status","OK"},{"code",0},{"message","Directory removed"}});
-                        std::cout << "[ok] " << sock.remote_endpoint() << " rmdir -> removed directory at '" << path << "'\n";
+                        std::cout << "[ok] " << endpoint_str(sock) << " rmdir -> removed directory at '" << path << "'\n";
                     } else {
                         send_json(sock, {{"cmd","RMDIR"},{"status","ERROR"},{"code",1},{"message","Directory does not exist"}});
-                        std::cout << "[error] " << sock.remote_endpoint() << " rmdir -> directory does not exist, path: '" << path << "'\n";
+                        std::cout << "[error] " << endpoint_str(sock) << " rmdir -> directory does not exist, path: '" << path << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","RMDIR"},{"status","ERROR"},{"code",1},{"message","Failed to remove directory"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " rmdir -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " rmdir -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "DELETE") {
                 std::string path = args.value("path", "");
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " delete -> access denied, path: " << path << ", root: " << root << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " delete -> access denied, path: " << path << ", root: " << root << "\n";
                     continue;
                 }
                 try {
                     if (std::filesystem::exists(path)) {
                         if (std::filesystem::is_directory(path)) {
                             send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",1},{"message","Path is directory not a file"}});
-                            std::cout << "[error] " << sock.remote_endpoint() << " delete -> path is not a file, path: '" << path << "'\n";
+                            std::cout << "[error] " << endpoint_str(sock) << " delete -> path is not a file, path: '" << path << "'\n";
                             continue;
                         }
                         std::filesystem::remove(path);
                         send_json(sock, {{"cmd","DELETE"},{"status","OK"},{"code",0},{"message","File deleted"}});
-                        std::cout << "[ok] " << sock.remote_endpoint() << " delete -> removed file at '" << path << "'\n";
+                        std::cout << "[ok] " << endpoint_str(sock) << " delete -> removed file at '" << path << "'\n";
                     } else {
                         send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",1},{"message","File does not exist"}});
-                        std::cout << "[error] " << sock.remote_endpoint() << " delete -> file does not exist, path: '" << path << "'\n";
+                        std::cout << "[error] " << endpoint_str(sock) << " delete -> file does not exist, path: '" << path << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","DELETE"},{"status","ERROR"},{"code",1},{"message","Failed to delete file"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " delete -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " delete -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "MOVE") {
                 std::string src = args.value("src", "");
@@ -590,7 +637,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
                 if (!is_path_under_root(root, src) || !is_path_under_root(root, dst)) {
                     send_json(sock, {{"cmd","MOVE"},{"status","ERROR"},{"code",2},{"message","Access denied: source or destination path is outside root (" + root + ")"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " move -> access denied, src: " << src << ", dst: " << dst << ", root: " << root << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " move -> access denied, src: " << src << ", dst: " << dst << ", root: " << root << "\n";
                     continue;
                 }
 
@@ -598,15 +645,15 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     if (std::filesystem::exists(src)) {
                         std::filesystem::rename(src, dst);
                         send_json(sock, {{"cmd","MOVE"},{"status","OK"},{"code",0},{"message","Move/Rename successful"}});
-                        std::cout << "[ok] " << sock.remote_endpoint() << " move -> moved/renamed from '" << src << "' to '" << dst << "'\n";
+                        std::cout << "[ok] " << endpoint_str(sock) << " move -> moved/renamed from '" << src << "' to '" << dst << "'\n";
                     } else {
                         send_json(sock, {{"cmd","MOVE"},{"status","ERROR"},{"code",1},{"message","Source path does not exist"}});
-                        std::cout << "[error] " << sock.remote_endpoint() << " move -> source path does not exist, src: '" << src << "'\n";
+                        std::cout << "[error] " << endpoint_str(sock) << " move -> source path does not exist, src: '" << src << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","MOVE"},{"status","ERROR"},{"code",1},{"message","Failed to move/rename"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " move -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " move -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "COPY") {
                 std::string src = args.value("src", "");
@@ -614,14 +661,14 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
                 if (!is_path_under_root(root, src) || !is_path_under_root(root, dst)) {
                     send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",2},{"message","Access denied: source or destination path is outside root (" + root + ")"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " copy -> access denied, src: " << src << ", dst: " << dst << ", root: " << root << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " copy -> access denied, src: " << src << ", dst: " << dst << ", root: " << root << "\n";
                     continue;
                 }
 
                 try {
                     if (!fs::exists(src)) {
                         send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",1},{"message","Source does not exist"},{"data", ""}});
-                        std::cout << "[error] " << sock.remote_endpoint() << " copy -> source does not exist: '" << src << "'\n";
+                        std::cout << "[error] " << endpoint_str(sock) << " copy -> source does not exist: '" << src << "'\n";
                         continue;
                     }
 
@@ -632,7 +679,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     if (dstPath.string().find(srcPath.string()) == 0) {
                         send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",3},
                                         {"message","Destination is inside source directory (would cause infinite recursion)"},{"data", ""}});
-                        std::cout << "[error] " << sock.remote_endpoint() << " copy -> destination is inside source directory\n";
+                        std::cout << "[error] " << endpoint_str(sock) << " copy -> destination is inside source directory\n";
                         continue;
                     }
                     if (std::filesystem::exists(src)) {
@@ -642,37 +689,41 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                             std::filesystem::copy_file(src, dst);
                         }
                         send_json(sock, {{"cmd","COPY"},{"status","OK"},{"code",0},{"message","Copy successful"}});
-                        std::cout << "[ok] " << sock.remote_endpoint() << " copy -> copied from '" << src << "' to '" << dst << "'\n";
+                        std::cout << "[ok] " << endpoint_str(sock) << " copy -> copied from '" << src << "' to '" << dst << "'\n";
                     } else {
                         send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",1},{"message","Source path does not exist"}});
-                        std::cout << "[error] " << sock.remote_endpoint() << " copy -> source path does not exist, src: '" << src << "'\n";
+                        std::cout << "[error] " << endpoint_str(sock) << " copy -> source path does not exist, src: '" << src << "'\n";
                     }
                 }
                 catch (const std::exception& e) {
                     send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",1},{"message","Failed to copy"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " copy -> exception: " << e.what() << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " copy -> exception: " << e.what() << "\n";
                 }
             } else if (cmd == "DOWNLOAD") {
                 std::string path = args.value("remote", "");
 
                 if (!std::filesystem::exists(path) || !std::filesystem::is_regular_file(path)) {
                     send_json(sock, {{"cmd", "DOWNLOAD"}, {"status", "ERROR"}, {"message", "File not found"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " download -> file not found: " << path << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " download -> file not found: " << path << "\n";
                     continue;
                 }
 
-                const size_t CHUNK_SIZE = 64 * 1024; // 64 KB chunky
+                const size_t CHUNK_SIZE = 64 * 1024; // 64 KB
                 std::ifstream file(path, std::ios::binary);
                 if (!file.is_open()) {
                     send_json(sock, {{"cmd", "DOWNLOAD"}, {"status", "ERROR"}, {"message", "Cannot open file"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " download -> cannot open file: " << path << "\n";
+                    std::cout << "[error] " << endpoint_str(sock) << " download -> cannot open file: " << path << "\n";
                     continue;
                 }
 
-                int64_t file_size = std::filesystem::file_size(path);
+                int64_t file_size    = std::filesystem::file_size(path);
                 int64_t total_chunks = (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
 
-                std::cout << "[server] Starting download file '" << path << "' of size " << file_size << " bytes in " << total_chunks << " chunks. From client: " << sock.remote_endpoint() << "\n";
+                std::cout << "[server] Starting download file '" << path
+                        << "' of size " << file_size << " bytes in "
+                        << total_chunks << " chunks. From client: "
+                        << endpoint_str(sock) << "\n";
+
                 send_json(sock, {
                     {"cmd", "DOWNLOAD"},
                     {"status", "OK"},
@@ -681,125 +732,228 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     {"total_chunks", total_chunks}
                 });
 
-                char buffer[CHUNK_SIZE];
-                for (size_t i = 0; i < total_chunks; ++i) {
-                    file.read(buffer, CHUNK_SIZE);
+                std::vector<char> buffer(CHUNK_SIZE);
+                int64_t sent_total = 0;
+                bool download_error = false;
+
+
+                for (int64_t i = 0; i < total_chunks && !download_error; /* i++ až pri úspešnom ACK */) {
+                    int64_t offset        = i * CHUNK_SIZE;
+                    int64_t bytes_to_send = std::min<int64_t>(CHUNK_SIZE, file_size - offset);
+
+                    file.seekg(offset, std::ios::beg);
+                    file.read(buffer.data(), bytes_to_send);
                     std::streamsize bytes_read = file.gcount();
-                    if (bytes_read <= 0) break;
-
-                    nlohmann::json header = {
-                        {"chunk_index", static_cast<int64_t>(i)},
-                        {"size", static_cast<int64_t>(bytes_read)}
-                    };
-                    send_json(sock, header);
-
-                    asio::write(sock, asio::buffer(buffer, bytes_read));
-
-                    nlohmann::json ack;
-                    if (!recv_json(sock, ack)) {
-                        std::cout << "\n[error] " << sock.remote_endpoint() << " client disconnected during download.\n";
+                    if (bytes_read <= 0) {
+                        std::cout << "\n[error] download -> failed to read chunk " << i << " from file\n";
+                        download_error = true;
                         break;
                     }
 
-                    if (ack.value("status", "") != "OK" || ack.value("ack", -1) != (int)i) {
-                        std::cout << "\n[error] " << sock.remote_endpoint() << " invalid ACK for chunk " << i << " — try again.\n";
-                        i--;
-                        continue;
+                    nlohmann::json header = {
+                        {"chunk_index", i},
+                        {"size", static_cast<int64_t>(bytes_read)}
+                    };
+
+                    int retry = 0;
+                    while (true) {
+                        // pošli header + dáta
+                        send_json(sock, header);
+                        asio::write(sock, asio::buffer(buffer.data(), bytes_read));
+
+                        if(!set_socket_recv_timeout(sock, 3)) {
+                            std::cout << "\n[error] download -> failed to set socket recv timeout\n";
+                            download_error = true;
+                            break;
+                        }
+                        nlohmann::json ack;
+                        bool got = recv_json(sock, ack);
+                        set_socket_recv_timeout(sock, 0);
+
+                        if (!got) {
+                            std::cout << "\n[error] " << endpoint_str(sock)
+                                    << " timeout or disconnect while waiting for ACK of chunk "
+                                    << i << "\n";
+                            download_error = true;
+                            break;
+                        }
+
+                        std::string st = ack.value("status", "");
+                        int64_t ack_i  = ack.value("ack", -1);
+                        int64_t nack_i = ack.value("nack", -1);
+
+                        if (st == "OK" && ack_i == i) {
+                            // OK – chunk potvrdený
+                            sent_total += bytes_read;
+
+                            double progress = (file_size > 0)
+                                ? (100.0 * (double)sent_total / (double)file_size)
+                                : 0.0;
+
+                            std::cout << "\r[info] sent chunk " << (i + 1) << "/"
+                                    << total_chunks << " ("
+                                    << std::fixed << std::setprecision(1)
+                                    << progress << "%) to client "
+                                    << endpoint_str(sock) << std::flush;
+
+                            ++i; // ďalší chunk
+                            break;
+                        }
+                        else if (st == "ERROR" && nack_i == i) {
+                            // klient NACK – zopakuj chunk
+                            std::cout << "\n[error] client " << endpoint_str(sock)
+                                    << " NACK for chunk " << i
+                                    << " – resending...\n";
+
+                            if (++retry >= 3) {
+                                std::cout << "[error] chunk " << i
+                                        << " NACKed too many times, aborting download\n";
+                                download_error = true;
+                                break;
+                            }
+                            // while(true) pokračuje – pošle znovu ten istý buffer
+                        }
+                        else {
+                            std::cout << "\n[error] invalid ACK/NACK for chunk " << i
+                                    << " from client " << endpoint_str(sock)
+                                    << " (status=" << st << ", ack=" << ack_i
+                                    << ", nack=" << nack_i << ")\n";
+                            download_error = true;
+                            break;
+                        }
                     }
-
-                    double progress = (file_size > 0)
-                    ? (100.0 * static_cast<double>((i + 1) * CHUNK_SIZE > file_size ? file_size : (i + 1) * CHUNK_SIZE) / file_size)
-                    : 0.0;
-
-                    std::cout << "\r[info] sent chunk " << (i + 1) << "/" << total_chunks
-                            << " (" << std::fixed << std::setprecision(1) << progress << "%) to client " << sock.remote_endpoint() << std::flush;
                 }
 
-                
-
                 file.close();
-                std::cout << "\n[ok] download finished successfully for " << path << " to client " << sock.remote_endpoint() << "\n";
+                if (!download_error) {
+                    std::cout << "\n[ok] download finished successfully for " << path
+                            << " to client " << endpoint_str(sock) << "\n";
+                } else {
+                    std::cout << "[error] download aborted for " << path
+                            << " to client " << endpoint_str(sock) << "\n";
+                }
             } else if (cmd == "UPLOAD") {
-                std::string path = args.value("remote", "");
+
+                std::string path     = args.value("remote", "");
                 std::string filename = fs::path(args.value("local", "")).filename().string();
                 std::string path_with_filename = (fs::path(path) / filename).string();
-                // std::cout << "[info] upload -> path: " << path << ", filename: " << filename << ", path_with_filename: " << path_with_filename << "\n";
 
                 if (!is_path_under_root(root, path)) {
-                    send_json(sock, {{"cmd","UPLOAD"},{"status","ERROR"},{"code",2},{"message","Access denied: path is outside root (" + root + ")"},{"data", "Access denied: path is outside root (" + root + ")"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " upload -> access denied, path: " << path << ", root: " << root << " local_path: " << args.value("local", "") << "\n";
+                    send_json(sock, {{"cmd","UPLOAD"},{"status","ERROR"},{"code",2},
+                                    {"message","Access denied: path is outside root (" + root + ")"}, 
+                                    {"data","Access denied: path is outside root (" + root + ")"}} );
+                    std::cout << "[error] " << endpoint_str(sock)
+                            << " upload -> access denied, path: " << path
+                            << ", root: " << root
+                            << " local_path: " << args.value("local", "") << "\n";
                     continue;
                 }
 
-                if (fs::is_directory(path) && !fs::exists(path + "/" + filename)) {
-                    send_json(sock, {{"cmd", "UPLOAD"}, {"status", "OK"}, {"message", "Ready to receive chunks"}});
-                    std::cout << "[info] " << sock.remote_endpoint() << " upload -> ready to receive chunks for '" << path << "'\n";
-                } else {
-                    send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "File already exists"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " upload -> reject upload to '" << path << "'\n";
+                if (!fs::is_directory(path)) {
+                    send_json(sock, {{"cmd","UPLOAD"},{"status","ERROR"},{"message","Remote path is not directory"}});
+                    std::cout << "[error] " << endpoint_str(sock)
+                            << " upload -> remote path is not directory: " << path << "\n";
                     continue;
                 }
 
                 if (fs::exists(path_with_filename)) {
-                    send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "File already exists"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " upload -> file already exists at '" << path_with_filename << "'\n";
+                    send_json(sock, {{"cmd","UPLOAD"},{"status","ERROR"},{"message","File already exists"}});
+                    std::cout << "[error] " << endpoint_str(sock)
+                            << " upload -> file already exists at '" << path_with_filename << "'\n";
                     continue;
                 }
 
-                recv_json(sock, req);
-                int64_t total_size = req.value("size", 0);  
-                int64_t chunk_size = req.value("chunk_size", 0);
-                int64_t total_chunks = req.value("total_chunks", 0);
+                send_json(sock, {{"cmd", "UPLOAD"}, {"status", "OK"}, {"message", "Ready to receive chunks"}});
 
-                
+                nlohmann::json meta;
+                if (!recv_json(sock, meta)) {
+                    std::cout << "[error] " << endpoint_str(sock)
+                            << " upload -> failed to receive meta\n";
+                    continue;
+                }
+
+                int64_t total_size    = meta.value("size", 0);
+                int64_t meta_chunk_sz = meta.value("chunk_size", 0);
+                int64_t total_chunks  = meta.value("total_chunks", 0);
 
                 std::ofstream outfile(path_with_filename, std::ios::binary);
                 if (!outfile.is_open()) {
                     send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "Cannot create file"}});
-                    std::cout << "[error] " << sock.remote_endpoint() << " upload -> cannot create file at '" << path << "'\n";
+                    std::cout << "[error] " << endpoint_str(sock)
+                            << " upload -> cannot create file at '" << path_with_filename << "'\n";
                     continue;
                 }
-                send_json(sock, {{"cmd", "UPLOAD"}, {"status", "OK"}, {"message", "Start sending chunks"}});
-                std::cout << "[server] Starting upload file '" << path_with_filename << "' of size " << total_size << " bytes in " << total_chunks << " chunks. From client: " << sock.remote_endpoint() << "\n";
 
-                int err = 0;
-                for (size_t i = 0; i < total_chunks; ++i) {
+                send_json(sock, {{"cmd", "UPLOAD"}, {"status", "OK"}, {"message", "Start sending chunks"}});
+                std::cout << "[server] Starting upload file '" << path_with_filename
+                        << "' of size " << total_size << " bytes in "
+                        << total_chunks << " chunks. From client: "
+                        << endpoint_str(sock) << "\n";
+
+                bool upload_error = false;
+
+                for (int64_t i = 0; i < total_chunks && !upload_error; /* i++ až po ACK */) {
+
                     nlohmann::json chunk_header;
                     if (!recv_json(sock, chunk_header)) {
-                        std::cout << "\n[error] " << sock.remote_endpoint() << " client disconnected during upload.\n";
-                        err = 1;
+                        std::cout << "\n[error] " << endpoint_str(sock)
+                                << " client disconnected during upload.\n";
+                        upload_error = true;
                         break;
                     }
 
                     int64_t chunk_index = chunk_header.value("chunk_index", -1);
-                    int64_t chunk_size = chunk_header.value("size", 0);
-                    if (chunk_index != (int64_t)i || chunk_size <= 0) {
-                        std::cout << "[error] " << sock.remote_endpoint() << " invalid chunk header for chunk " << i << " — aborting upload.\n";
-                        err = 1;
-                        break;
+                    int64_t chunk_size  = chunk_header.value("size", 0);
+
+                    if (chunk_index != i || chunk_size <= 0) {
+                        std::cout << "[error] " << endpoint_str(sock)
+                                << " invalid chunk header for chunk " << i
+                                << " — NACK\n";
+                        send_json(sock, {{"status", "ERROR"}, {"nack", i}});
+                        continue;
                     }
 
                     std::vector<char> buffer(chunk_size);
-                    asio::read(sock, asio::buffer(buffer.data(), chunk_size));
+                    asio::error_code ec;
+                    size_t bytes_read = asio::read(sock, asio::buffer(buffer.data(), chunk_size), ec);
+
+
+                    if (ec || bytes_read != static_cast<size_t>(chunk_size)) {
+                        std::cout << "\n[error] " << endpoint_str(sock)
+                                << " NACK for chunk " << i
+                                << " (read error)" << "\n";
+                        send_json(sock, {{"status", "ERROR"}, {"nack", i}});
+                        continue;                 
+                    }
 
                     outfile.write(buffer.data(), chunk_size);
 
-                    // Posli ACK klientovi
-                    send_json(sock, {{"status", "OK"}, {"ack", static_cast<int64_t>(i)}});
+                    send_json(sock, {{"status", "OK"}, {"ack", i}});
 
-                    double progress = 100.0 * (double)(i + 1) / (double)total_chunks;
-                    std::cout << "\r[info] upload chunk " << (i + 1) << "/" << total_chunks
-                            << " (" << std::fixed << std::setprecision(1) << progress << "%) from client: " << sock.remote_endpoint() << std::flush;
+                    double progress = 100.0 * double(i + 1) / double(total_chunks);
+                    std::cout << "\r[info] upload chunk " << (i + 1) << "/"
+                            << total_chunks << " ("
+                            << std::fixed << std::setprecision(1)
+                            << progress << "%) from client: "
+                            << endpoint_str(sock) << std::flush;
+
+                    ++i;
                 }
 
                 outfile.close();
-                if (!err) {
-                    std::cout << "\n[ok] upload finished successfully for '" << path_with_filename << "' from client " << sock.remote_endpoint() << "\n";
+
+                if (!upload_error) {
+                    std::cout << "\n[ok] upload finished successfully for '"
+                            << path_with_filename << "' from client "
+                            << endpoint_str(sock) << "\n";
                 } else {
-                    std::cout << "[error] upload failed for '" << path_with_filename << "' from client " << sock.remote_endpoint() << "\n";
+                    std::cout << "[error] upload failed for '"
+                            << path_with_filename << "' from client "
+                            << endpoint_str(sock) << "\n";
                     std::error_code ec;
                     fs::remove(path_with_filename, ec);
                 }
+
             } else if (cmd == "SYNC") {
                 std::string path = args.value("remote", "");
 
@@ -810,7 +964,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         {"code", 1},
                         {"message", "Access denied: path is outside root"}
                     });
-                    std::cout << "[error] " << sock.remote_endpoint()
+                    std::cout << "[error] " << endpoint_str(sock)
                               << " sync -> access denied, path: '" << path
                               << "', root: '" << root << "'\n";
                     continue;
@@ -824,7 +978,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         {"code", 2},
                         {"message", "Path is not existing directory on server"}
                     });
-                    std::cout << "[error] " << sock.remote_endpoint()
+                    std::cout << "[error] " << endpoint_str(sock)
                               << " sync -> path not dir: '" << path << "'\n";
                     continue;
                 }
@@ -841,7 +995,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         {"entries", entries}
                     });
 
-                    std::cout << "[ok] " << sock.remote_endpoint()
+                    std::cout << "[ok] " << endpoint_str(sock)
                               << " sync -> index for '" << path
                               << "' sent, entries=" << entries.size() << "\n\n\n";
                 }
@@ -852,19 +1006,19 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         {"code", 3},
                         {"message", std::string("Failed to build index: ") + e.what()}
                     });
-                    std::cout << "[error] " << sock.remote_endpoint()
+                    std::cout << "[error] " << endpoint_str(sock)
                               << " sync -> exception: " << e.what() << "\n";
 
                 } 
             } else {
                 send_json(sock, {{"cmd", cmd}, {"status","ERROR"}, {"code",1}, {"message","Unknown command"}});
-                std::cout << "[error] " << sock.remote_endpoint() << " unknown command: " << cmd << "\n";
+                std::cout << "[error] " << endpoint_str(sock) << " unknown command: " << cmd << "\n";
             }
         } 
     } catch (const std::exception& e) {
         std::cout << "[server] exception: " << e.what() << "\n";
     }
-    std::cout << "[server] client " << sock.remote_endpoint() << " disconnected\n";
+    std::cout << "[server] client " << endpoint_str(sock) << " disconnected\n";
 }
 
 
@@ -938,9 +1092,9 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
-    std::signal(SIGINT,  handle_signal);   
-    std::signal(SIGTERM, handle_signal);   
-    std::signal(SIGQUIT, handle_signal); 
+    // std::signal(SIGINT,  handle_signal);   
+    // std::signal(SIGTERM, handle_signal);   
+    // std::signal(SIGQUIT, handle_signal); 
 
     // 4) Spustenie servera
     std::cout << "[server] starting...\n";
