@@ -594,6 +594,264 @@ void build_local_index(const fs::path& root_dir,
 
 static std::atomic_bool g_interrupted{false};
 
+// rovnaký chunk size ako na serveri
+static constexpr int64_t DOWNLOAD_CHUNK_SIZE = 64 * 1024;
+
+bool resume_download_from_entry(
+    tcp::socket& sock,
+    const std::string& port,
+    const std::string& root,
+    const nlohmann::json& entry)
+{
+    fs::path final_path;   // aby sme ho mali dostupný aj v catch
+
+    try {
+        std::string cmd = entry.value("cmd", "");
+        if (cmd != "DOWNLOAD") {
+            std::cout << "[error] resume: entry is not DOWNLOAD\n";
+            return false;
+        }
+
+        std::string server_path = entry.value("local",  "");
+        std::string client_path = entry.value("remote", "");
+        int64_t     start_chunk = entry.value("chunk_index", 0);
+
+        if (server_path.empty() || client_path.empty()) {
+            std::cout << "[error] resume: missing paths in .part entry\n";
+            return false;
+        }
+
+        final_path = fs::path(client_path);
+        fs::path dir      = final_path.parent_path();
+        std::string base  = final_path.filename().string();
+
+        if (base.empty()) {
+            std::cout << "[error] resume: invalid client file path: " << client_path << "\n";
+            return false;
+        }
+
+        fs::path hidden_path = dir / ("." + base);
+        {
+            std::error_code ec;
+            if (fs::exists(hidden_path, ec)) {
+                fs::rename(hidden_path, final_path, ec);
+                if (ec) {
+                    std::cout << "[error] resume: cannot rename "
+                              << hidden_path << " -> " << final_path
+                              << " (" << ec.message() << ")\n";
+                    return false;
+                }
+                std::cout << "[info] using partial file: "
+                          << final_path.string() << "\n";
+            } else if (!fs::exists(final_path, ec)) {
+                std::cout << "[warning] no partial file found, restarting from beginning.\n";
+                start_chunk = 0;
+            } else {
+                std::cout << "[info] resuming into existing file: "
+                          << final_path.string() << "\n";
+            }
+        }
+
+        if (start_chunk < 0) start_chunk = 0;
+
+        nlohmann::json args;
+        args["remote"]            = server_path;         // cesta na serveri
+        args["local"]             = dir.string();        // lokálny cieľový adresár
+        args["filename"]          = base;                // cieľový názov súboru
+        args["resume_from_chunk"] = start_chunk;         // tu je to dôležité
+
+        nlohmann::json req = {
+            {"client_port", port},
+            {"cmd", "DOWNLOAD"},
+            {"args", args},
+            {"root", root}
+        };
+        send_json(sock, req);
+
+        nlohmann::json resp;
+        if (!recv_json(sock, resp)) {
+            std::cout << "[error] resume: server closed connection during DOWNLOAD\n";
+            return false;
+        }
+
+        if (resp.value("status", "ERROR") != "OK") {
+            std::cout << "[error] resume: server refused DOWNLOAD: "
+                      << resp.value("message", "") << "\n";
+            return false;
+        }
+
+        int64_t file_size    = resp.value("size", 0);
+        int64_t chunk_size   = resp.value("chunk_size", 0);
+        int64_t total_chunks = resp.value("total_chunks", 0);
+
+        if (start_chunk > total_chunks) {
+            std::cout << "[warning] resume: start_chunk > total_chunks, resetting to 0\n";
+            start_chunk = 0;
+        }
+
+        std::cout << "\n[info] Resuming download of '" << server_path
+                  << "' into '" << final_path.string() << "'\n";
+        std::cout << "[info] File size: " << file_size << " bytes, "
+                  << total_chunks << " chunks, starting at chunk "
+                  << start_chunk << "\n\n";
+
+        if (base.empty()) {
+            std::cout << "[error] resume: invalid client file path: "
+                    << final_path.string() << "\n";
+            return false;
+        }
+
+        if (!base.empty() && base[0] == '.') {
+            std::string new_name = base.substr(1);  // bez bodky
+            fs::path new_path = dir / new_name;
+
+            std::error_code ec;
+            fs::rename(final_path, new_path, ec);
+            if (ec) {
+                std::cout << "[error] resume: cannot rename "
+                        << final_path << " -> " << new_path
+                        << " (" << ec.message() << ")\n";
+                return false;
+            }
+
+            final_path = new_path;
+            std::cout << "[info] using partial file: "
+                    << final_path.string() << "\n";
+        } else {
+            fs::path hidden_path = dir / ("." + base);
+
+            std::error_code ec;
+            if (fs::exists(hidden_path, ec)) {
+                fs::rename(hidden_path, final_path, ec);
+                if (ec) {
+                    std::cout << "[error] resume: cannot rename "
+                            << hidden_path << " -> " << final_path
+                            << " (" << ec.message() << ")\n";
+                    return false;
+                }
+                std::cout << "[info] using partial file: "
+                        << final_path.string() << "\n";
+            }
+        }
+        std::ofstream out(final_path, std::ios::binary | std::ios::app);
+        if (!out.is_open()) {
+            std::cout << "[error] resume: cannot open local file for append: "
+                      << final_path.string() << "\n";
+            return false;
+        }
+
+        int64_t received_total = start_chunk * chunk_size;
+        bool download_error = false;
+
+        for (int64_t i = start_chunk; i < total_chunks; ++i) {
+
+            if (g_interrupted.load(std::memory_order_relaxed)) {
+                std::cout << "\n[error] resume download interrupted by user (Ctrl+C)\n";
+
+                nlohmann::json nack = {
+                    {"status", "ERROR"},
+                    {"nack", i},
+                    {"message", "Download interrupted"},
+                    {"private_mode", true},
+                    {"remote_path", final_path.string()}
+                };
+                send_json(sock, nack);
+
+                download_error = true;
+                break;
+            }
+
+            nlohmann::json header;
+            if (!recv_json(sock, header)) {
+                std::cout << "\n[error] resume: failed to receive header for chunk "
+                          << i << "\n";
+                download_error = true;
+                break;
+            }
+
+            int64_t chunk_index    = header.value("chunk_index", -1);
+            int64_t bytes_expected = header.value("size", 0);
+
+            if (chunk_index != i || bytes_expected <= 0) {
+                std::cout << "\n[error] resume: invalid chunk header (idx="
+                          << chunk_index << ", expected=" << i << ")\n";
+                nlohmann::json nack = {{"status", "ERROR"}, {"nack", i}};
+                send_json(sock, nack);
+                download_error = true;
+                break;
+            }
+
+            std::vector<char> buffer(bytes_expected);
+            asio::error_code ec;
+            size_t bytes_read_total = 0;
+
+            while (bytes_read_total < (size_t)bytes_expected) {
+                size_t n = sock.read_some(
+                    asio::buffer(buffer.data() + bytes_read_total,
+                                 bytes_expected - bytes_read_total),
+                    ec
+                );
+                if (ec) {
+                    std::cout << "\n[error] resume: socket read error on chunk "
+                              << i << ": " << ec.message() << "\n";
+                    nlohmann::json nack = {{"status", "ERROR"}, {"nack", i}};
+                    send_json(sock, nack);
+                    download_error = true;
+                    break;
+                }
+                bytes_read_total += n;
+            }
+
+            if (download_error) break;
+
+            out.write(buffer.data(), bytes_read_total);
+            received_total += bytes_read_total;
+
+            nlohmann::json ack = {{"status", "OK"}, {"ack", i}};
+            send_json(sock, ack);
+
+            double progress = (total_chunks > 0)
+                ? (100.0 * (i + 1) / (double)total_chunks)
+                : 0.0;
+
+            std::cout << "\r[resume] chunk " << (i + 1) << "/"
+                      << total_chunks << " ("
+                      << std::fixed << std::setprecision(1)
+                      << progress << "%)" << std::flush;
+        }
+
+        out.close();
+
+        if (!download_error) {
+            std::cout << "\n\n[ok] Resume download completed -> "
+                      << final_path.string() << "\n";
+            return true;
+        } else {
+            std::cout << "\n[error] Resume download failed.\n";
+            // vymaž neúplný súbor
+            std::error_code ec;
+            fs::remove(final_path, ec);
+            if (ec) {
+                std::cout << "[error] resume: failed to remove partial file '"
+                          << final_path.string() << "': " << ec.message() << "\n";
+            }
+            return false;
+        }
+    }
+    catch (const std::exception& e) {
+        std::cout << "\n[error] resume: exception: " << e.what() << "\n";
+        if (!final_path.empty()) {
+            std::error_code ec;
+            fs::remove(final_path, ec);
+            if (ec) {
+                std::cout << "[error] resume: failed to remove partial file '"
+                          << final_path.string() << "': " << ec.message() << "\n";
+            }
+        }
+        return false;
+    }
+}
+
 void handle_signal(int)
 {
     g_interrupted.store(true, std::memory_order_relaxed);
@@ -803,6 +1061,138 @@ int main(int argc, char* argv[]) {
                 log("info", "Client " + user + " successfully logged in.");
                 log("info", "Client " + user + " connected to " + host + ":" + port);
 
+                bool has_part = auth.value("has_part", false);
+
+
+                if (has_part) {
+                    auto part_entries = auth.value("part", nlohmann::json::array());
+
+                    if (part_entries.is_array() && !part_entries.empty()) {
+                        std::cout << "Incomplete upload/downloads detected, resume? (y/n):\n> "
+                                << std::flush;
+
+                        std::string answer;
+                        if (std::getline(std::cin, answer)) {
+
+                            answer.erase(std::remove_if(answer.begin(), answer.end(),
+                                                        [](unsigned char c){ return std::isspace(c); }),
+                                        answer.end());
+
+                            if (!answer.empty()) {
+                                char c = static_cast<char>(
+                                    std::tolower(static_cast<unsigned char>(answer[0]))
+                                );
+                            if (c == 'y') {
+                                std::cout
+                                    << "\n"
+                                    << "╔══════════════════════════════════════════════╗\n"
+                                    << "║      Resuming interrupted DOWNLOADs         ║\n"
+                                    << "╚══════════════════════════════════════════════╝\n\n";
+
+                                std::size_t index = 0;
+                                bool any_resumed = false;
+
+                                for (const auto& entry : part_entries) {
+                                    std::string cmd = entry.value("cmd", "");
+                                    if (cmd != "DOWNLOAD") {
+                                        continue; // UPLOAD zatiaľ neriešime
+                                    }
+
+                                    any_resumed = true;
+                                    ++index;
+
+                                    std::string server_path = entry.value("local", "");
+                                    std::string client_path = entry.value("remote", "");
+                                    int64_t chunk_idx       = entry.value("chunk_index", 0);
+                                    int64_t total_chunks    = entry.value("total_chunks", 0);
+
+                                    std::string file_name =
+                                        fs::path(client_path.empty() ? server_path : client_path)
+                                            .filename().string();
+                                    if (file_name.empty()) file_name = "?";
+
+                                    double pct = 0.0;
+                                    if (total_chunks > 0) {
+                                        pct = 100.0 * static_cast<double>(chunk_idx)
+                                                    / static_cast<double>(total_chunks);
+                                    }
+
+                                    std::cout << "┌──────────────────────────────────────────────┐\n";
+                                    std::cout << "│ [" << index << "] DOWNLOAD <" << file_name << ">\n";
+                                    std::cout << "│   Server : " << server_path << "\n";
+                                    std::cout << "│   Local  : " << client_path << "\n";
+                                    std::cout << "│   Chunks : " << chunk_idx << " / " << total_chunks
+                                            << "  ("
+                                            << std::fixed << std::setprecision(1) << pct << "%)\n";
+                                    std::cout << "└──────────────────────────────────────────────┘\n";
+
+                                    // skutočné resumé
+                                    bool ok = resume_download_from_entry(
+                                        sock,
+                                        port,
+                                        auth.value("root", "/"),
+                                        entry
+                                    );
+
+                                    if (!ok) {
+                                        std::cout << "[error] resume for <" << file_name << "> failed.\n\n";
+                                    } else {
+                                        std::cout << "[ok] resume for <" << file_name << "> done successfully.\n\n";
+                                    }
+                                }
+
+                                if (!any_resumed) {
+                                    std::cout << "[info] No DOWNLOAD entries to resume (only UPLOADs in .part).\n\n";
+                                }
+                            }
+                                else {
+                                    std::cout << "\n[info] Resuming interrupted transfers was declined.\n";
+
+                                    for (const auto& entry : part_entries) {
+                                        std::string cmd    = entry.value("cmd", "");
+                                        if (cmd != "DOWNLOAD") {
+                                            continue; 
+                                        }
+
+                                        std::string remote = entry.value("remote", "");
+                                        if (remote.empty()) {
+                                            continue;
+                                        }
+
+                                        fs::path final_path(remote); 
+
+                                        std::error_code ec;
+                                        if (fs::exists(final_path, ec)) {
+                                            bool removed = fs::remove(final_path, ec);
+                                            if (removed && !ec) {
+                                                std::cout << "  Removed partial file: "
+                                                        << final_path.string() << "\n";
+                                            } else {
+                                                std::cout << "  [error] Failed to remove partial file: "
+                                                        << final_path.string()
+                                                        << " (" << ec.message() << ")\n";
+                                            }
+                                        } else {
+                                            std::cout << "  No partial file found for: "
+                                                    << remote << "\n";
+                                        }
+                                    }
+
+                                    std::cout << "[info] You can start a fresh download/upload anytime.\n\n";
+                                }
+                            }
+                        } else {
+                            std::cout << "\n[input] aborted while waiting for answer.\n";
+                        }
+                    }
+                }
+
+
+
+
+
+
+
 
 
             } else {
@@ -887,7 +1277,7 @@ int main(int argc, char* argv[]) {
             }
         }
 
-
+        bool private_mode = !(auth.value("mode","") == "public");
         std::string root = auth.value("root", "/");
         std::string dir = root;
 
@@ -1280,6 +1670,7 @@ int main(int argc, char* argv[]) {
                         }
 
                         if (download_error) {
+
                             break;
                         }
 
@@ -1319,13 +1710,34 @@ int main(int argc, char* argv[]) {
                     out.close();
 
                     // ak download nedobehol korektne, vymaž rozpracovaný súbor
-                    if (download_error) {
+                    if (download_error && private_mode) {
+                        std::error_code ec_rm;
+                        fs::path final_path   = out_path;
+
+                        fs::path hidden_path  = final_path.parent_path()
+                                            / ("." + final_path.filename().string());
+
+                        fs::rename(final_path, hidden_path, ec_rm);
+
+                        send_json(sock, {{"cmd", "DOWNLOAD"},
+                                        {"status", "ERROR"},
+                                        {"message", "Download interrupted"},
+                                        {"remote_path", hidden_path.string()},
+                                        {"private_mode", private_mode}});
+
+
+                        std::cout << "\n[error] Download failed, partial file removed: "
+                                << out_path << "\n";
+                        log("error", "Download failed, partial file renamed: " + hidden_path.string(), CMD);
+                    } else if (download_error) {
                         std::error_code ec_rm;
                         fs::remove(out_path, ec_rm);
-                        std::cout << "[error] Download failed, partial file removed: "
+
+                        std::cout << "\n[error] Download failed, partial file removed: "
                                 << out_path << "\n";
                         log("error", "Download failed, partial file removed: " + out_path, CMD);
-                    } else {
+                    }
+                    else {
                         double speed_mbps = (received_total * 8.0) /
                                             (seconds * 1024.0 * 1024.0); // Mbit/s
                         double speed_mb_s = (received_total / (1024.0 * 1024.0)) / seconds; // MB/s

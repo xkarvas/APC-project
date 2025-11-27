@@ -54,7 +54,9 @@
         "thread": "cpp",
         "iomanip": "cpp",
         "fstream": "cpp",
-        "sstream": "cpp"
+        "sstream": "cpp",
+        "future": "cpp",
+        "memory": "cpp"
     },
     "C_Cpp.errorSquiggles": "disabled"
 }

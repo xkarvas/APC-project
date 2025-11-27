@@ -60,7 +60,7 @@ static bool set_socket_recv_timeout(tcp::socket& sock, int seconds)
 #else
     struct timeval tv;
     tv.tv_sec  = seconds;
-    tv.tv_usec = 0;
+    tv.tv_usec = 0; 
     if (setsockopt(sock.native_handle(),
                    SOL_SOCKET,
                    SO_RCVTIMEO,
@@ -313,6 +313,37 @@ void build_dir_index(const fs::path& root_dir,
     }
 }
 
+void write_part_info(const std::string& root,
+                     const std::string& cmd,
+                     int64_t chunk_index,
+                     int64_t total_chunks,
+                     const std::string& local_path,
+                     const std::string& remote_path)
+{
+    try {
+        fs::path part_path = fs::path(root) / ".part";   // napr. /user/root/.part
+
+        nlohmann::json j = {
+            {"cmd",          cmd},
+            {"chunk_index",  chunk_index},
+            {"total_chunks", total_chunks},
+            {"local",        local_path},
+            {"remote",       remote_path}
+        };
+
+        std::ofstream f(part_path, std::ios::app);  // append
+        if (!f.is_open()) {
+            std::cerr << "[error] cannot open part file: "
+                      << part_path << "\n";
+            return;
+        }
+
+        f << j.dump() << "\n";
+    } catch (const std::exception& e) {
+        std::cerr << "[error] write_part_info failed: " << e.what() << "\n";
+    }
+}
+
 static void handle_client(tcp::socket sock, const fs::path& root) {
     try {
         // authentication phase
@@ -398,14 +429,63 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         fs::path base_root = root; 
                         std::string user_root_str = prepare_user_root(base_root.string(), username);
 
+                        
+
+
+
+
+                        bool has_part = false;
+                        nlohmann::json part_entries = nlohmann::json::array();
+
+                        try {
+                            fs::path part_path = fs::path(user_root_str) / ".part";
+
+                            if (fs::exists(part_path) && fs::is_regular_file(part_path)) {
+                                has_part = true;
+
+                                std::ifstream pf(part_path);
+                                if (!pf.is_open()) {
+                                    std::cerr << "[error] cannot open .part file for user "
+                                            << username << ": " << part_path << "\n";
+                                } else {
+                                    std::string line;
+                                    while (std::getline(pf, line)) {
+                                        if (line.empty()) continue;
+
+                                        try {
+                                            nlohmann::json j = nlohmann::json::parse(line);
+                                            part_entries.push_back(j);
+                                        } catch (const std::exception& e) {
+                                            std::cerr << "[warn] failed to parse line in .part for user "
+                                                    << username << ": " << e.what() << "\n";
+                                        }
+                                    }
+                                }
+                            }
+                            fs::remove(part_path);
+                        } catch (const std::exception& e) {
+                            std::cerr << "[error] while reading .part for user "
+                                    << username << ": " << e.what() << "\n";
+                        }
 
                         std::cout << "[auth] User " << username << " was successfully logged in!\n";
 
-                        send_json(sock, {
-                            {"cmd","LOGIN"},{"status","OK"},{"code",0},
+                        // priprav LOGIN odpoveď
+                        nlohmann::json login_resp = {
+                            {"cmd","LOGIN"},
+                            {"status","OK"},
+                            {"code",0},
                             {"message","Welcome!"},
-                            {"root", user_root_str}
-                        });
+                            {"root", user_root_str},
+                            {"has_part", has_part}
+                        };
+
+                        if (has_part) {
+                            // tu pošleme zoznam všetkých „rozrobených“ operácií
+                            login_resp["part"] = part_entries;
+                        }
+
+                        send_json(sock, login_resp);;
                     } else {
                         send_json(sock, {
                             {"cmd","LOGIN"},{"status","ERROR"},{"code",1},
@@ -469,7 +549,6 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
                     send_json(sock, {{"cmd","REGISTER"},{"status","OK"},{"code",0},{"message","Registered"},{"root",user_root_str}});
                 }
-                // TO DO: Presmerovanie roota na private repozitar
             }
         }
 
@@ -708,6 +787,19 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     continue;
                 }
 
+                if (!is_path_under_root(root, path)) {
+                    send_json(sock, {
+                        {"cmd",    "DOWNLOAD"},
+                        {"status", "ERROR"},
+                        {"code",   2},
+                        {"message","Access denied: path is outside root (" + root + ")"}
+                    });
+                    std::cout << "[error] " << endpoint_str(sock)
+                            << " download -> access denied, path: " << path
+                            << ", root: " << root << "\n";
+                    continue;
+                }
+
                 const size_t CHUNK_SIZE = 64 * 1024; // 64 KB
                 std::ifstream file(path, std::ios::binary);
                 if (!file.is_open()) {
@@ -735,9 +827,26 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                 std::vector<char> buffer(CHUNK_SIZE);
                 int64_t sent_total = 0;
                 bool download_error = false;
+                bool resume_mode = false;
 
+                int64_t start_chunk = 0;
+                if (args.contains("resume_from_chunk")) {
+                    int64_t resume_chunk = args.value("resume_from_chunk", 0);
 
-                for (int64_t i = 0; i < total_chunks && !download_error; /* i++ až pri úspešnom ACK */) {
+                    if (resume_chunk < 0) resume_chunk = 0;
+                    if (resume_chunk > total_chunks) resume_chunk = total_chunks;
+
+                    if (resume_chunk > 0 && resume_chunk < total_chunks) {
+                        start_chunk = resume_chunk;
+                        resume_mode = true;
+
+                        sent_total = resume_chunk * CHUNK_SIZE;
+                        std::cout << "[info] Resuming download from chunk " << resume_chunk
+                                << " for client " << endpoint_str(sock) << "\n";
+                    }
+                }
+                
+                for (int64_t i = start_chunk; i < total_chunks && !download_error;) {
                     int64_t offset        = i * CHUNK_SIZE;
                     int64_t bytes_to_send = std::min<int64_t>(CHUNK_SIZE, file_size - offset);
 
@@ -761,14 +870,14 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         send_json(sock, header);
                         asio::write(sock, asio::buffer(buffer.data(), bytes_read));
 
-                        if(!set_socket_recv_timeout(sock, 3)) {
-                            std::cout << "\n[error] download -> failed to set socket recv timeout\n";
-                            download_error = true;
-                            break;
-                        }
+                        // if(!set_socket_recv_timeout(sock, 30)) {
+                        //     std::cout << "\n[error] download -> failed to set socket recv timeout\n";
+                        //     download_error = true;
+                        //     break;
+                        // }
                         nlohmann::json ack;
                         bool got = recv_json(sock, ack);
-                        set_socket_recv_timeout(sock, 0);
+                        //set_socket_recv_timeout(sock, 0);
 
                         if (!got) {
                             std::cout << "\n[error] " << endpoint_str(sock)
@@ -813,6 +922,17 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                             }
                             // while(true) pokračuje – pošle znovu ten istý buffer
                         }
+                        else if (st == "ERROR" && ack.value("message", "") == "Download interrupted") {
+                            std::cout << "\n[error] client " << endpoint_str(sock)
+                                    << " aborted the download.\n";
+
+                            if (ack.value("private_mode", false)) {
+                                std::cout << "[info] download interrupted in private mode, saving progress info.\n";
+                                write_part_info(root, "DOWNLOAD", i, total_chunks, path, ack.value("remote_path", ""));
+                            }
+                            download_error = true;
+                            break;
+                        }
                         else {
                             std::cout << "\n[error] invalid ACK/NACK for chunk " << i
                                     << " from client " << endpoint_str(sock)
@@ -826,6 +946,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
                 file.close();
                 if (!download_error) {
+
                     std::cout << "\n[ok] download finished successfully for " << path
                             << " to client " << endpoint_str(sock) << "\n";
                 } else {
