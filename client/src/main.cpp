@@ -1083,66 +1083,67 @@ int main(int argc, char* argv[]) {
                                     std::tolower(static_cast<unsigned char>(answer[0]))
                                 );
                             if (c == 'y') {
-                                std::cout
-                                    << "\n"
-                                    << "╔══════════════════════════════════════════════╗\n"
-                                    << "║      Resuming interrupted DOWNLOADs         ║\n"
-                                    << "╚══════════════════════════════════════════════╝\n\n";
-
                                 std::size_t index = 0;
                                 bool any_resumed = false;
 
                                 for (const auto& entry : part_entries) {
                                     std::string cmd = entry.value("cmd", "");
-                                    if (cmd != "DOWNLOAD") {
-                                        continue; // UPLOAD zatiaľ neriešime
-                                    }
+                                    if (cmd == "DOWNLOAD") {
+                                        std::cout
+                                                << "\n"
+                                                << "╔══════════════════════════════════════════════╗\n"
+                                                << "║      Resuming interrupted DOWNLOADs         ║\n"
+                                                << "╚══════════════════════════════════════════════╝\n\n";
 
-                                    any_resumed = true;
-                                    ++index;
+                                        any_resumed = true;
+                                        ++index;
 
-                                    std::string server_path = entry.value("local", "");
-                                    std::string client_path = entry.value("remote", "");
-                                    int64_t chunk_idx       = entry.value("chunk_index", 0);
-                                    int64_t total_chunks    = entry.value("total_chunks", 0);
+                                        std::string server_path = entry.value("local", "");
+                                        std::string client_path = entry.value("remote", "");
+                                        int64_t chunk_idx       = entry.value("chunk_index", 0);
+                                        int64_t total_chunks    = entry.value("total_chunks", 0);
 
-                                    std::string file_name =
-                                        fs::path(client_path.empty() ? server_path : client_path)
-                                            .filename().string();
-                                    if (file_name.empty()) file_name = "?";
+                                        std::string file_name =
+                                            fs::path(client_path.empty() ? server_path : client_path)
+                                                .filename().string();
+                                        if (file_name.empty()) file_name = "?";
 
-                                    double pct = 0.0;
-                                    if (total_chunks > 0) {
-                                        pct = 100.0 * static_cast<double>(chunk_idx)
-                                                    / static_cast<double>(total_chunks);
-                                    }
+                                        double pct = 0.0;
+                                        if (total_chunks > 0) {
+                                            pct = 100.0 * static_cast<double>(chunk_idx)
+                                                        / static_cast<double>(total_chunks);
+                                        }
 
-                                    std::cout << "┌──────────────────────────────────────────────┐\n";
-                                    std::cout << "│ [" << index << "] DOWNLOAD <" << file_name << ">\n";
-                                    std::cout << "│   Server : " << server_path << "\n";
-                                    std::cout << "│   Local  : " << client_path << "\n";
-                                    std::cout << "│   Chunks : " << chunk_idx << " / " << total_chunks
-                                            << "  ("
-                                            << std::fixed << std::setprecision(1) << pct << "%)\n";
-                                    std::cout << "└──────────────────────────────────────────────┘\n";
+                                        std::cout << "┌──────────────────────────────────────────────┐\n";
+                                        std::cout << "│ [" << index << "] DOWNLOAD <" << file_name << ">\n";
+                                        std::cout << "│   Server : " << server_path << "\n";
+                                        std::cout << "│   Local  : " << client_path << "\n";
+                                        std::cout << "│   Chunks : " << chunk_idx << " / " << total_chunks
+                                                << "  ("
+                                                << std::fixed << std::setprecision(1) << pct << "%)\n";
+                                        std::cout << "└──────────────────────────────────────────────┘\n";
 
-                                    // skutočné resumé
-                                    bool ok = resume_download_from_entry(
-                                        sock,
-                                        port,
-                                        auth.value("root", "/"),
-                                        entry
-                                    );
+                                        // skutočné resumé
+                                        bool ok = resume_download_from_entry(
+                                            sock,
+                                            port,
+                                            auth.value("root", "/"),
+                                            entry
+                                        );
 
-                                    if (!ok) {
-                                        std::cout << "[error] resume for <" << file_name << "> failed.\n\n";
+                                        if (!ok) {
+                                            std::cout << "[error] resume for <" << file_name << "> failed.\n\n";
+                                        } else {
+                                            std::cout << "[ok] resume for <" << file_name << "> done successfully.\n\n";
+                                        }
                                     } else {
-                                        std::cout << "[ok] resume for <" << file_name << "> done successfully.\n\n";
+                                        std::cout
+                                                << "\n"
+                                                << "╔══════════════════════════════════════════════╗\n"
+                                                << "║         Resuming interrupted UPLOADs         ║\n"
+                                                << "╚══════════════════════════════════════════════╝\n\n";
+                                        std::cout << "[info] Resuming UPLOAD operations is not supported yet.\n\n";
                                     }
-                                }
-
-                                if (!any_resumed) {
-                                    std::cout << "[info] No DOWNLOAD entries to resume (only UPLOADs in .part).\n\n";
                                 }
                             }
                                 else {
@@ -1151,6 +1152,7 @@ int main(int argc, char* argv[]) {
                                     for (const auto& entry : part_entries) {
                                         std::string cmd    = entry.value("cmd", "");
                                         if (cmd != "DOWNLOAD") {
+                                            //poslat socketom info o zruseni uploadu -> vymazanie hidden suboru na serveri
                                             continue; 
                                         }
 
@@ -1818,6 +1820,15 @@ int main(int argc, char* argv[]) {
                     if (g_interrupted.load(std::memory_order_relaxed)) {
                         std::cout << "\n\n[error] upload interrupted by signal (Ctrl+C)\n";
                         log("error", "Upload interrupted by signal (Ctrl+C)", CMD);
+
+                        nlohmann::json nack = {
+                            {"status", "ERROR"},
+                            {"nack", i},
+                            {"message", "Upload interrupted"},
+                            {"private_mode", true},
+                            {"local_path", local_path}
+                        };
+                        send_json(sock, nack);
                         err = 1;
                         break;
                     }
@@ -1847,6 +1858,14 @@ int main(int argc, char* argv[]) {
                         if (g_interrupted.load(std::memory_order_relaxed)) {
                             std::cout << "\n\n[error] upload interrupted by signal (Ctrl+C)\n";
                             log("error", "Upload interrupted by signal (Ctrl+C)", CMD);
+                            nlohmann::json nack = {
+                                {"status", "ERROR"},
+                                {"chunk_index", i},
+                                {"message", "Upload interrupted"},
+                                {"private_mode", true},
+                                {"local_path", local_path}
+                            };
+                            send_json(sock, nack);
                             err = 1;
                             break;
                         }
@@ -1854,24 +1873,8 @@ int main(int argc, char* argv[]) {
                         send_json(sock, header);
                         asio::write(sock, asio::buffer(buffer.data(), bytes_read));
 
-                        set_socket_recv_timeout(sock, 3);
                         nlohmann::json ack;
-                        bool got = recv_json(sock, ack);
-                        set_socket_recv_timeout(sock, 0);
-
-                        if (!got) {
-                            if (g_interrupted.load(std::memory_order_relaxed)) {
-                                std::cout << "[error] upload interrupted by signal (Ctrl+C)\n";
-                                log("error", "Upload interrupted by signal (Ctrl+C) while waiting for ACK", CMD);
-                            } else {
-                                std::cout << "\n[error] timeout or disconnect while waiting for ACK of chunk "
-                                        << i << "\n";
-                                log("error", "Timeout or disconnect while waiting for ACK of chunk " +
-                                            std::to_string(i), CMD);
-                            }
-                            err = 1;
-                            break;
-                        }
+                        recv_json(sock, ack);
 
                         std::string st = ack.value("status", "");
                         int64_t ack_i  = ack.value("ack", -1);

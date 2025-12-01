@@ -1023,6 +1023,34 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         break;
                     }
 
+                    if (chunk_header.value("status", "") == "ERROR" &&
+                        chunk_header.value("message", "") == "Upload interrupted") {
+                        std::cout << "\n[error] " << endpoint_str(sock)
+                                << " upload aborted by client.\n";
+
+                        if (chunk_header.value("private_mode", false)) {
+
+                            fs::path final_path   = path_with_filename;
+
+                            fs::path hidden_path  = final_path.parent_path()
+                                            / ("." + final_path.filename().string());
+
+                            fs::rename(final_path, hidden_path);
+
+
+                            std::cout << "[info] upload interrupted in private mode, saving progress info.\n";
+                            write_part_info(root, "UPLOAD", i, total_chunks, chunk_header.value("local_path", ""), hidden_path);
+                        } else {    
+                            std::cout << "[error] upload failed for '"
+                                    << path_with_filename << "' from client "
+                                    << endpoint_str(sock) << "\n";
+                            std::error_code ec;
+                            fs::remove(path_with_filename, ec);
+                        }
+                        upload_error = true;
+                        break;
+                    }
+
                     int64_t chunk_index = chunk_header.value("chunk_index", -1);
                     int64_t chunk_size  = chunk_header.value("size", 0);
 
@@ -1067,12 +1095,6 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     std::cout << "\n[ok] upload finished successfully for '"
                             << path_with_filename << "' from client "
                             << endpoint_str(sock) << "\n";
-                } else {
-                    std::cout << "[error] upload failed for '"
-                            << path_with_filename << "' from client "
-                            << endpoint_str(sock) << "\n";
-                    std::error_code ec;
-                    fs::remove(path_with_filename, ec);
                 }
 
             } else if (cmd == "SYNC") {
