@@ -958,6 +958,21 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                 std::string path     = args.value("remote", "");
                 std::string filename = fs::path(args.value("local", "")).filename().string();
                 std::string path_with_filename = (fs::path(path) / filename).string();
+                if (args.value("resume", false)) {
+                    path = args.value("remote", "");
+                    fs::path hidden_path = args.value("remote_full", "");       
+                    fs::path dir         = hidden_path.parent_path(); 
+                    std::string base     = hidden_path.filename().string();
+
+                    if (!base.empty() && base[0] == '.') {
+                        std::string new_name = base.substr(1);        
+                        fs::path final_path  = dir / new_name;        
+
+                        std::error_code ec;
+                        fs::rename(hidden_path, final_path, ec);
+                        path_with_filename = final_path.string();
+                    }
+                }
 
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {{"cmd","UPLOAD"},{"status","ERROR"},{"code",2},
@@ -977,7 +992,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     continue;
                 }
 
-                if (fs::exists(path_with_filename)) {
+                if (fs::exists(path_with_filename) && !args.value("resume", false)) {
                     send_json(sock, {{"cmd","UPLOAD"},{"status","ERROR"},{"message","File already exists"}});
                     std::cout << "[error] " << endpoint_str(sock)
                             << " upload -> file already exists at '" << path_with_filename << "'\n";
@@ -997,11 +1012,56 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                 int64_t meta_chunk_sz = meta.value("chunk_size", 0);
                 int64_t total_chunks  = meta.value("total_chunks", 0);
 
-                std::ofstream outfile(path_with_filename, std::ios::binary);
+                int64_t start_chunk = 0;
+                if (args.contains("resume_from_chunk")) {
+                    int64_t resume_chunk = args.value("resume_from_chunk", 0);
+
+                    if (resume_chunk < 0) resume_chunk = 0;
+                    if (resume_chunk > total_chunks) resume_chunk = total_chunks;
+
+                    if (resume_chunk > 0 && resume_chunk < total_chunks) {
+                        start_chunk = resume_chunk;
+
+                        std::cout << "[info] Resuming upload from chunk " << resume_chunk
+                                << " for client " << endpoint_str(sock) << "\n";
+                    }
+                    
+                }
+
+                bool is_resume = args.value("resume", false);
+
+                std::ofstream outfile;
+
+                if (is_resume) {
+                    if (!fs::exists(path_with_filename)) {
+                        send_json(sock, {
+                            {"cmd",    "UPLOAD"},
+                            {"status", "ERROR"},
+                            {"message","Partial file for resume not found"}
+                        });
+
+                        std::cout << "[error] " << endpoint_str(sock)
+                                << " upload -> resume requested, but file does not exist at '"
+                                << path_with_filename << "'\n";
+                        continue;
+                    }
+
+                    outfile.open(path_with_filename,
+                                std::ios::binary | std::ios::in | std::ios::out);
+                    outfile.seekp(0, std::ios::end);
+                } else {
+                    outfile.open(path_with_filename, std::ios::binary);
+                }
+
                 if (!outfile.is_open()) {
-                    send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "Cannot create file"}});
+                    send_json(sock, {
+                        {"cmd",    "UPLOAD"},
+                        {"status", "ERROR"},
+                        {"message","Cannot create/open file"}
+                    });
                     std::cout << "[error] " << endpoint_str(sock)
-                            << " upload -> cannot create file at '" << path_with_filename << "'\n";
+                            << " upload -> cannot open file at '"
+                            << path_with_filename << "'\n";
                     continue;
                 }
 
@@ -1013,7 +1073,8 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
                 bool upload_error = false;
 
-                for (int64_t i = 0; i < total_chunks && !upload_error; /* i++ až po ACK */) {
+
+                for (int64_t i = start_chunk; i < total_chunks && !upload_error; /* i++ až po ACK */) {
 
                     nlohmann::json chunk_header;
                     if (!recv_json(sock, chunk_header)) {
@@ -1089,6 +1150,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     ++i;
                 }
 
+
                 outfile.close();
 
                 if (!upload_error) {
@@ -1153,6 +1215,12 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                               << " sync -> exception: " << e.what() << "\n";
 
                 } 
+            } else if (cmd == "CANCEL_PARTIAL") {
+                std::string remote = args.value("remote", "");
+                std::cout << "[info] " << endpoint_str(sock)
+                          << " Upload resuming declined, removing partial file: " << remote << "\n";
+                fs::remove(remote);
+                continue;
             } else {
                 send_json(sock, {{"cmd", cmd}, {"status","ERROR"}, {"code",1}, {"message","Unknown command"}});
                 std::cout << "[error] " << endpoint_str(sock) << " unknown command: " << cmd << "\n";

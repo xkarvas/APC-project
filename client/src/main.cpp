@@ -594,7 +594,6 @@ void build_local_index(const fs::path& root_dir,
 
 static std::atomic_bool g_interrupted{false};
 
-// rovnaký chunk size ako na serveri
 static constexpr int64_t DOWNLOAD_CHUNK_SIZE = 64 * 1024;
 
 bool resume_download_from_entry(
@@ -603,7 +602,7 @@ bool resume_download_from_entry(
     const std::string& root,
     const nlohmann::json& entry)
 {
-    fs::path final_path;   // aby sme ho mali dostupný aj v catch
+    fs::path final_path;   
 
     try {
         std::string cmd = entry.value("cmd", "");
@@ -655,10 +654,10 @@ bool resume_download_from_entry(
         if (start_chunk < 0) start_chunk = 0;
 
         nlohmann::json args;
-        args["remote"]            = server_path;         // cesta na serveri
-        args["local"]             = dir.string();        // lokálny cieľový adresár
-        args["filename"]          = base;                // cieľový názov súboru
-        args["resume_from_chunk"] = start_chunk;         // tu je to dôležité
+        args["remote"]            = server_path;         
+        args["local"]             = dir.string();        
+        args["filename"]          = base;                
+        args["resume_from_chunk"] = start_chunk;         
 
         nlohmann::json req = {
             {"client_port", port},
@@ -828,7 +827,6 @@ bool resume_download_from_entry(
             return true;
         } else {
             std::cout << "\n[error] Resume download failed.\n";
-            // vymaž neúplný súbor
             std::error_code ec;
             fs::remove(final_path, ec);
             if (ec) {
@@ -848,6 +846,240 @@ bool resume_download_from_entry(
                           << final_path.string() << "': " << ec.message() << "\n";
             }
         }
+        return false;
+    }
+}
+
+bool resume_upload_from_entry(
+    tcp::socket& sock,
+    const std::string& port,
+    const std::string& root,
+    const nlohmann::json& entry)
+{
+    try {
+        std::string cmd = entry.value("cmd", "");
+        if (cmd != "UPLOAD") {
+            std::cout << "[error] resume upload: entry is not UPLOAD\n";
+            return false;
+        }
+
+        std::string local_path  = entry.value("local",  "");
+        std::string remote_path = entry.value("remote", "");
+        int64_t     start_chunk = entry.value("chunk_index", 0);
+        int64_t     total_chunks = entry.value("total_chunks", 0);
+
+        if (local_path.empty() || remote_path.empty()) {
+            std::cout << "[error] resume upload: missing paths in .part entry\n";
+            return false;
+        }
+
+        if (!fs::exists(local_path) || fs::is_directory(local_path)) {
+            std::cout << "[error] resume upload: local path is not a file: "
+                      << local_path << "\n";
+            return false;
+        }
+
+        const int64_t CHUNK_SIZE = 64 * 1024;
+
+        int64_t file_size = static_cast<int64_t>(fs::file_size(local_path));
+        int64_t expected_total_chunks =
+            (file_size + CHUNK_SIZE - 1) / CHUNK_SIZE;
+
+        if (total_chunks <= 0) {
+            total_chunks = expected_total_chunks;
+        }
+
+        if (start_chunk < 0) start_chunk = 0;
+        if (start_chunk > total_chunks) {
+            std::cout << "[warning] resume upload: start_chunk > total_chunks, resetting to 0\n";
+            start_chunk = 0;
+        }
+
+        fs::path remote_full = remote_path;               // napr. /.../.IMG_0038.MOV
+        fs::path remote_dir  = remote_full.parent_path(); // /.../1/
+
+        std::cout << "\n[info] Resuming upload of '" << local_path
+                  << "' to '" << remote_full.string() << "'\n";
+        std::cout << "[info] File size: " << file_size << " bytes, "
+                  << total_chunks << " chunks, starting at chunk "
+                  << start_chunk << "\n\n";
+
+        // 1) pošleme znovu základný UPLOAD command s informáciou, že je to resumé
+        nlohmann::json args;
+        args["local"]             = local_path;
+        args["remote"]            = remote_dir.generic_string();
+        args["resume"]            = true;                      // flag pre server
+        args["remote_full"]       = remote_full.generic_string(); // plná cesta k .IMG_...
+        args["resume_from_chunk"] = start_chunk;
+
+        nlohmann::json req_up = {
+            {"client_port", port},
+            {"cmd", "UPLOAD"},
+            {"args", args},
+            {"root", root}
+        };
+        send_json(sock, req_up);
+
+        nlohmann::json resp_up;
+        if (!recv_json(sock, resp_up)) {
+            std::cout << "[error] resume upload: server closed connection\n";
+            return false;
+        }
+        if (resp_up.value("status", "") != "OK") {
+            std::cout << "[error] resume upload: server rejected: "
+                      << resp_up.value("message", "") << "\n";
+            return false;
+        }
+
+        std::ifstream file(local_path, std::ios::binary);
+        if (!file.is_open()) {
+            std::cout << "[error] resume upload: cannot open local file "
+                      << local_path << "\n";
+            return false;
+        }
+
+        // 2) META s resume_from_chunk – server podľa toho vie, odkiaľ pokračovať
+        nlohmann::json meta = {
+            {"cmd",             "UPLOAD"},
+            {"status",          "OK"},
+            {"size",            file_size},
+            {"chunk_size",      CHUNK_SIZE},
+            {"total_chunks",    total_chunks},
+            {"resume_from_chunk", start_chunk}
+        };
+        send_json(sock, meta);
+
+        nlohmann::json resp_meta;
+        if (!recv_json(sock, resp_meta) || resp_meta.value("status", "") != "OK") {
+            std::cout << "[error] resume upload: server did not accept meta: "
+                      << resp_meta.value("message", "") << "\n";
+            return false;
+        }
+
+        std::cout << "[info] Server accepted resumed upload. Sending remaining data...\n";
+
+        int64_t sent_total = start_chunk * CHUNK_SIZE;
+        int err = 0;
+        std::vector<char> buffer(CHUNK_SIZE);
+
+        for (int64_t i = start_chunk; i < total_chunks && !err; ) {
+
+            if (g_interrupted.load(std::memory_order_relaxed)) {
+                std::cout << "\n\n[error] resume upload interrupted by signal (Ctrl+C)\n";
+
+                nlohmann::json nack = {
+                    {"status",      "ERROR"},
+                    {"nack",        i},
+                    {"message",     "Upload interrupted"},
+                    {"private_mode", true},
+                    {"local_path",  local_path}
+                };
+                send_json(sock, nack);
+                err = 1;
+                break;
+            }
+
+            int64_t offset        = i * CHUNK_SIZE;
+            int64_t bytes_to_send = std::min<int64_t>(CHUNK_SIZE, file_size - offset);
+
+            if (bytes_to_send <= 0) {
+                break;
+            }
+
+            file.seekg(offset, std::ios::beg);
+            file.read(buffer.data(), bytes_to_send);
+            std::streamsize bytes_read = file.gcount();
+
+            if (bytes_read <= 0) {
+                std::cout << "[error] resume upload: nothing read from file for chunk "
+                          << i << "\n";
+                err = 1;
+                break;
+            }
+
+            nlohmann::json header = {
+                {"chunk_index", i},
+                {"size",        static_cast<int64_t>(bytes_read)}
+            };
+
+            int retry = 0;
+            while (true) {
+
+                if (g_interrupted.load(std::memory_order_relaxed)) {
+                    std::cout << "\n\n[error] resume upload interrupted by signal (Ctrl+C)\n";
+                    nlohmann::json nack = {
+                        {"status",      "ERROR"},
+                        {"nack",        i},
+                        {"message",     "Upload interrupted"},
+                        {"private_mode", true},
+                        {"local_path",  local_path}
+                    };
+                    send_json(sock, nack);
+                    err = 1;
+                    break;
+                }
+
+                send_json(sock, header);
+                asio::write(sock, asio::buffer(buffer.data(), bytes_read));
+
+                nlohmann::json ack;
+                if (!recv_json(sock, ack)) {
+                    std::cout << "\n[error] resume upload: server closed while waiting for ACK\n";
+                    err = 1;
+                    break;
+                }
+
+                std::string st = ack.value("status", "");
+                int64_t ack_i  = ack.value("ack",  -1);
+                int64_t nack_i = ack.value("nack", -1);
+
+                if (st == "OK" && ack_i == i) {
+                    sent_total += bytes_read;
+
+                    double progress = (file_size > 0)
+                        ? (100.0 * static_cast<double>(sent_total) / static_cast<double>(file_size))
+                        : 0.0;
+
+                    std::cout << "\r[resume upload] chunk " << (i + 1) << "/"
+                              << total_chunks << " ("
+                              << std::fixed << std::setprecision(1)
+                              << progress << "%)" << std::flush;
+
+                    ++i;
+                    break;
+                } else if (st == "ERROR" && nack_i == i) {
+                    std::cout << "\n[error] server NACK for chunk " << i
+                              << " – resending...\n";
+                    if (++retry >= 3) {
+                        std::cout << "[error] chunk " << i
+                                  << " NACKed too many times, aborting upload\n";
+                        err = 1;
+                        break;
+                    }
+                } else {
+                    std::cout << "\n[error] invalid ACK/NACK for chunk " << i
+                              << " from server (status=" << st
+                              << ", ack=" << ack_i
+                              << ", nack=" << nack_i << ")\n";
+                    err = 1;
+                    break;
+                }
+            }
+        }
+
+        file.close();
+
+        if (!err && !g_interrupted.load(std::memory_order_relaxed)) {
+            std::cout << "\n\n[ok] Resume upload completed -> "
+                      << remote_full.string() << "\n";
+            return true;
+        } else {
+            std::cout << "\n[error] Resume upload failed.\n";
+            return false;
+        }
+    }
+    catch (const std::exception& e) {
+        std::cout << "\n[error] resume upload: exception: " << e.what() << "\n";
         return false;
     }
 }
@@ -1068,7 +1300,7 @@ int main(int argc, char* argv[]) {
                     auto part_entries = auth.value("part", nlohmann::json::array());
 
                     if (part_entries.is_array() && !part_entries.empty()) {
-                        std::cout << "Incomplete upload/downloads detected, resume? (y/n):\n> "
+                        std::cout << "Incomplete upload/downloads detected, resume? (y/n):\n\n> "
                                 << std::flush;
 
                         std::string answer;
@@ -1082,80 +1314,76 @@ int main(int argc, char* argv[]) {
                                 char c = static_cast<char>(
                                     std::tolower(static_cast<unsigned char>(answer[0]))
                                 );
-                            if (c == 'y') {
-                                std::size_t index = 0;
-                                bool any_resumed = false;
-
-                                for (const auto& entry : part_entries) {
-                                    std::string cmd = entry.value("cmd", "");
-                                    if (cmd == "DOWNLOAD") {
-                                        std::cout
-                                                << "\n"
-                                                << "╔══════════════════════════════════════════════╗\n"
-                                                << "║      Resuming interrupted DOWNLOADs         ║\n"
-                                                << "╚══════════════════════════════════════════════╝\n\n";
-
-                                        any_resumed = true;
-                                        ++index;
-
-                                        std::string server_path = entry.value("local", "");
-                                        std::string client_path = entry.value("remote", "");
-                                        int64_t chunk_idx       = entry.value("chunk_index", 0);
-                                        int64_t total_chunks    = entry.value("total_chunks", 0);
-
-                                        std::string file_name =
-                                            fs::path(client_path.empty() ? server_path : client_path)
-                                                .filename().string();
-                                        if (file_name.empty()) file_name = "?";
-
-                                        double pct = 0.0;
-                                        if (total_chunks > 0) {
-                                            pct = 100.0 * static_cast<double>(chunk_idx)
-                                                        / static_cast<double>(total_chunks);
-                                        }
-
-                                        std::cout << "┌──────────────────────────────────────────────┐\n";
-                                        std::cout << "│ [" << index << "] DOWNLOAD <" << file_name << ">\n";
-                                        std::cout << "│   Server : " << server_path << "\n";
-                                        std::cout << "│   Local  : " << client_path << "\n";
-                                        std::cout << "│   Chunks : " << chunk_idx << " / " << total_chunks
-                                                << "  ("
-                                                << std::fixed << std::setprecision(1) << pct << "%)\n";
-                                        std::cout << "└──────────────────────────────────────────────┘\n";
-
-                                        // skutočné resumé
-                                        bool ok = resume_download_from_entry(
-                                            sock,
-                                            port,
-                                            auth.value("root", "/"),
-                                            entry
-                                        );
-
-                                        if (!ok) {
-                                            std::cout << "[error] resume for <" << file_name << "> failed.\n\n";
-                                        } else {
-                                            std::cout << "[ok] resume for <" << file_name << "> done successfully.\n\n";
-                                        }
-                                    } else {
-                                        std::cout
-                                                << "\n"
-                                                << "╔══════════════════════════════════════════════╗\n"
-                                                << "║         Resuming interrupted UPLOADs         ║\n"
-                                                << "╚══════════════════════════════════════════════╝\n\n";
-                                        std::cout << "[info] Resuming UPLOAD operations is not supported yet.\n\n";
-                                    }
-                                }
-                            }
-                                else {
-                                    std::cout << "\n[info] Resuming interrupted transfers was declined.\n";
+                                if (c == 'y') {
+                                    std::size_t index = 0;
+                                    bool any_resumed = false;
 
                                     for (const auto& entry : part_entries) {
-                                        std::string cmd    = entry.value("cmd", "");
-                                        if (cmd != "DOWNLOAD") {
-                                            //poslat socketom info o zruseni uploadu -> vymazanie hidden suboru na serveri
-                                            continue; 
-                                        }
+                                        std::string cmd = entry.value("cmd", "");
+                                        if (cmd == "DOWNLOAD") {
+                                            std::cout
+                                                    << "\n"
+                                                    << "╔══════════════════════════════════════════════╗\n"
+                                                    << "║      Resuming interrupted DOWNLOADs         ║\n"
+                                                    << "╚══════════════════════════════════════════════╝\n\n";
 
+                                            any_resumed = true;
+                                            ++index;
+
+                                            std::string server_path = entry.value("local", "");
+                                            std::string client_path = entry.value("remote", "");
+                                            int64_t chunk_idx       = entry.value("chunk_index", 0);
+                                            int64_t total_chunks    = entry.value("total_chunks", 0);
+
+                                            std::string file_name =
+                                                fs::path(client_path.empty() ? server_path : client_path)
+                                                    .filename().string();
+                                            if (file_name.empty()) file_name = "?";
+
+                                            double pct = 0.0;
+                                            if (total_chunks > 0) {
+                                                pct = 100.0 * static_cast<double>(chunk_idx)
+                                                            / static_cast<double>(total_chunks);
+                                            }
+
+                                            std::cout << "┌──────────────────────────────────────────────┐\n";
+                                            std::cout << "│ [" << index << "] DOWNLOAD <" << file_name << ">\n";
+                                            std::cout << "│   Server : " << server_path << "\n";
+                                            std::cout << "│   Local  : " << client_path << "\n";
+                                            std::cout << "│   Chunks : " << chunk_idx << " / " << total_chunks
+                                                    << "  ("
+                                                    << std::fixed << std::setprecision(1) << pct << "%)\n";
+                                            std::cout << "└──────────────────────────────────────────────┘\n";
+
+                                            // skutočné resumé
+                                            bool ok = resume_download_from_entry(
+                                                sock,
+                                                port,
+                                                auth.value("root", "/"),
+                                                entry
+                                            );
+
+                                            if (!ok) {
+                                                std::cout << "[error] resume for <" << file_name << "> failed.\n\n";
+                                            } else {
+                                                std::cout << "[ok] resume for <" << file_name << "> done successfully.\n\n";
+                                            }
+                                        } else {
+                                            std::cout
+                                                    << "\n"
+                                                    << "╔══════════════════════════════════════════════╗\n"
+                                                    << "║         Resuming interrupted UPLOADs         ║\n"
+                                                    << "╚══════════════════════════════════════════════╝\n\n";
+                                            std::cout << "[info] Resuming UPLOAD operations is not supported yet.\n\n";
+                                            bool ok = resume_upload_from_entry(sock, port, auth.value("root", "/"), entry);
+                                        }
+                                    }
+                                } else {
+                                std::cout << "\n[info] Resuming interrupted transfers was declined.\n";
+
+                                for (const auto& entry : part_entries) {
+                                    std::string cmd    = entry.value("cmd", "");
+                                    if (cmd == "DOWNLOAD") {
                                         std::string remote = entry.value("remote", "");
                                         if (remote.empty()) {
                                             continue;
@@ -1169,22 +1397,35 @@ int main(int argc, char* argv[]) {
                                             if (removed && !ec) {
                                                 std::cout << "  Removed partial file: "
                                                         << final_path.string() << "\n";
+                                                log("info", "Removed partial file: " + final_path.string());
                                             } else {
                                                 std::cout << "  [error] Failed to remove partial file: "
                                                         << final_path.string()
                                                         << " (" << ec.message() << ")\n";
+                                                log("error", "Failed to remove partial file: "
+                                                        + final_path.string() + " (" + ec.message() + ")");
                                             }
                                         } else {
                                             std::cout << "  No partial file found for: "
                                                     << remote << "\n";
+                                            log("info", "No partial file found for: " + remote);
                                         }
+                                    } else {
+                                        send_json(sock, nlohmann::json{
+                                            {"cmd", "CANCEL_PARTIAL"},
+                                            {"client_port", port},
+                                            {"root", auth.value("root", "/")},
+                                            {"args", entry}
+                                        });
+                                        log("info", "Sent CANCEL_PARTIAL for an UPLOAD entry.");
                                     }
 
                                     std::cout << "[info] You can start a fresh download/upload anytime.\n\n";
                                 }
                             }
-                        } else {
-                            std::cout << "\n[input] aborted while waiting for answer.\n";
+                            } else {
+                                std::cout << "\n[input] aborted while waiting for answer.\n";
+                            }
                         }
                     }
                 }
