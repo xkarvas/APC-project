@@ -1162,6 +1162,46 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
             } else if (cmd == "SYNC") {
                 std::string path = args.value("remote", "");
 
+                if (req.value("message", "") == "DONE") {
+                    std::cout << "[info] " << endpoint_str(sock)
+                              << " done -> removing sync for path: '" << path << "'\n";
+                    fs::path sync_file = fs::path(root) / ".sync.txt";
+
+                    try {
+                        if (!fs::exists(sync_file)) {
+                            continue;
+                        } else {
+                            std::ifstream in(sync_file);
+                            if (in) {
+                                std::vector<std::string> lines;
+                                std::string line;
+                                while (std::getline(in, line)) {
+                                    if (line != path) {            // všetky != path nechávame
+                                        lines.push_back(line);
+                                    }
+                                }
+                                in.close();
+                                if (lines.size() == 0) {
+                                    fs::remove(sync_file);
+                                    continue;
+                                }
+                                std::ofstream out(sync_file, std::ios::trunc);
+                                if (out) {
+                                    for (const auto &l : lines) {
+                                        out << l << '\n';
+                                    }
+                                }
+                            }
+                        }
+                    } catch (const std::exception &e) {
+                        std::cout << "[error] " << endpoint_str(sock)
+                                << " done -> exception while updating sync file: "
+                                << e.what() << "\n";
+                    }
+
+                    continue;
+                }
+
                 if (!is_path_under_root(root, path)) {
                     send_json(sock, {
                         {"cmd", "SYNC"},
@@ -1180,13 +1220,82 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     send_json(sock, {
                         {"cmd", "SYNC"},
                         {"status", "ERROR"},
-                        {"code", 2},
+                        {"code", 1},
                         {"message", "Path is not existing directory on server"}
                     });
                     std::cout << "[error] " << endpoint_str(sock)
                               << " sync -> path not dir: '" << path << "'\n";
                     continue;
                 }
+                // zapisanie do .sync.txt v root priečinku
+                fs::path sync_file = fs::path(root) / ".sync.txt";
+
+                try {
+                    bool already_present = false;
+
+                    if (fs::exists(sync_file)) {
+                        // Súbor existuje -> prečítaj a skontroluj, či tam už path je
+                        std::ifstream in(sync_file);
+                        if (!in) {
+                            send_json(sock, {
+                                {"cmd", "SYNC"},
+                                {"status", "ERROR"},
+                                {"code", 1},
+                                {"message", "Failed to open sync file"}
+                            });
+                            std::cout << "[error] " << endpoint_str(sock)
+                                    << " sync -> cannot open sync file: '" << sync_file.string() << "'\n";
+                            continue;
+                        }
+
+                        std::string line;
+                        while (std::getline(in, line)) {
+                            if (line == path) {
+                                already_present = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (already_present) {
+                        send_json(sock, {
+                            {"cmd", "SYNC"},
+                            {"status", "ERROR"},
+                            {"code", 1},
+                            {"message", "Sync for this directory is already active"}
+                        });
+                        std::cout << "[error] " << endpoint_str(sock)
+                                << " sync -> directory already active: '" << path << "'\n";
+                        continue;
+                    } else {
+                        std::ofstream out(sync_file, std::ios::app);
+                        if (!out) {
+                            send_json(sock, {
+                                {"cmd", "SYNC"},
+                                {"status", "ERROR"},
+                                {"code", 1},
+                                {"message", "Failed to update sync file"}
+                            });
+                            std::cout << "[error] " << endpoint_str(sock)
+                                    << " sync -> cannot write to sync file: '" << sync_file.string() << "'\n";
+                            continue;
+                        }
+                        out << path << '\n';
+                    }
+
+                } catch (const std::exception &e) {
+                    send_json(sock, {
+                        {"cmd", "SYNC"},
+                        {"status", "ERROR"},
+                        {"code", 1},
+                        {"message", std::string("Exception while handling sync file: ") + e.what()}
+                    });
+                    std::cout << "[error] " << endpoint_str(sock)
+                            << " sync -> exception for sync file: " << e.what() << "\n";
+                    continue;
+                }
+
+
 
                 try {
                     nlohmann::json entries = nlohmann::json::array();

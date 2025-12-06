@@ -2247,7 +2247,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-                // 4b) vytvorenie adresárov + upload / update súborov
+                // vytvorenie adresárov + upload / update súborov
                 for (const auto& [rel, l] : local_index) {
                     auto it = remote_index.find(rel);
 
@@ -2276,10 +2276,8 @@ int main(int argc, char* argv[]) {
                             ops.push_back({Op::DELETE_FILE, rel});
                             ops.push_back({Op::UPLOAD_FILE, rel});
 
-                            // (voliteľný debug)
-                            // std::cout << "[sync] changed file: " << rel << "\n";
                         } else {
-                            // hash je rovnaký -> SKIPPED (netreba nič robiť)
+                            // hash je rovnaký -> skip
                             skipped_files.push_back(rel);
                         }
                     }
@@ -2362,13 +2360,11 @@ int main(int argc, char* argv[]) {
                 }
 
 
-                // UPLOAD súbory – teraz pridáme
+                // UPLOAD súbory 
                 for (const auto& op : ops) {
                     if (op.type != Op::UPLOAD_FILE) continue;
 
-                    // plná lokálna cesta k súboru
                     fs::path local_full = local_path / fs::path(op.rel);
-                    // cieľový adresár na serveri
                     fs::path remote_dir_for_file =
                         fs::path(server_path) / fs::path(op.rel).parent_path();
 
@@ -2386,10 +2382,8 @@ int main(int argc, char* argv[]) {
                     }
                 }
 
-                // --- SUMÁR SYNCU ---
 
                 std::cout << "\n";
-                // skipped files (rovnaký hash)
                 if (!skipped_files.empty()) {
                     std::cout << "[info] skipped files (unchanged, hash OK):\n";
                     for (const auto& rel : skipped_files) {
@@ -2404,12 +2398,21 @@ int main(int argc, char* argv[]) {
                 std::cout << "\n[info] Synchronization finished.\n";
                 log("info", "Synchronization finished. Skipped " + std::to_string(skipped_files.size()) + " file(s).", CMD);
 
+                nlohmann::json sync_comp = {
+                        {"cmd", "SYNC"},
+                        {"message", "DONE"},
+                        {"root", root},
+                        {"args", {
+                            {"remote", server_path}
+                        }}
+                    };
+                send_json(sock, sync_comp);
+
                 auto sync_end = std::chrono::steady_clock::now();
                 std::chrono::duration<double> elapsed = sync_end - sync_start;
                 double seconds = elapsed.count();
                 
 
-                // --- spočítanie štatistík z ops ---
                 for (const auto& op : ops) {
                     switch (op.type) {
                         case Op::DELETE_FILE: deleted_files_count++; break;
