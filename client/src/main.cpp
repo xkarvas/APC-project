@@ -2099,7 +2099,7 @@ int main(int argc, char* argv[]) {
                                 {"status", "ERROR"},
                                 {"chunk_index", i},
                                 {"message", "Upload interrupted"},
-                                {"private_mode", true},
+                                {"private_mode", private_mode},
                                 {"local_path", local_path}
                             };
                             send_json(sock, nack);
