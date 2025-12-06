@@ -1857,7 +1857,8 @@ int main(int argc, char* argv[]) {
 
                     auto   start_time     = std::chrono::steady_clock::now();
                     int64_t received_total = 0;
-                    bool   download_error  = false;   // či sa download nepodaril (aj kvôli Ctrl+C)
+                    bool   download_error  = false;   
+                    bool time_error = false;
 
                     for (int64_t i = 0; i < total_chunks; ++i) {
 
@@ -1871,9 +1872,17 @@ int main(int argc, char* argv[]) {
 
                         nlohmann::json header;
                         if (!recv_json(sock, header)) {
-                            std::cout << "[error] failed to receive header for chunk " << i << "\n";
+                            std::cout << "\n\n[error] failed to receive header for chunk " << i << "\n";
                             log("error", "Failed to receive header for chunk " + std::to_string(i), CMD);
                             download_error = true;
+                            break;
+                        }
+
+                        if (header.value("status", "") == "ERROR") {
+                            std::cout << "\n\n[error] " + header.value("message", "unknown error");
+                            log("error", header.value("message", "unknown error"));
+                            download_error = true;
+                            time_error = true;
                             break;
                         }
 
@@ -1912,10 +1921,6 @@ int main(int argc, char* argv[]) {
                             bytes_read_total += n;
                         }
 
-                        if (download_error) {
-
-                            break;
-                        }
 
                         if (bytes_read_total != bytes_expected) {
                             std::cout << "[error] incomplete chunk " << chunk_index
@@ -1953,7 +1958,7 @@ int main(int argc, char* argv[]) {
                     out.close();
 
                     // ak download nedobehol korektne, vymaž rozpracovaný súbor
-                    if (download_error && private_mode) {
+                    if (download_error && private_mode && !time_error) {
                         std::error_code ec_rm;
                         fs::path final_path   = out_path;
 
@@ -1972,12 +1977,19 @@ int main(int argc, char* argv[]) {
                         std::cout << "\n[error] Download failed, partial file removed: "
                                 << out_path << "\n";
                         log("error", "Download failed, partial file renamed: " + hidden_path.string(), CMD);
+                    } else if (time_error) {
+                        std::error_code ec_rm;
+                        fs::remove(out_path, ec_rm);
+
+                        std::cout << "\n[error] Download failed due to server error, partial file removed: "
+                                << out_path << "\n\n";
+                        log("error", "Download failed due to server error, partial file removed: " + out_path, CMD);
                     } else if (download_error) {
                         std::error_code ec_rm;
                         fs::remove(out_path, ec_rm);
 
                         std::cout << "\n[error] Download failed, partial file removed: "
-                                << out_path << "\n";
+                                << out_path << "\n\n";
                         log("error", "Download failed, partial file removed: " + out_path, CMD);
                     }
                     else {
@@ -2055,25 +2067,9 @@ int main(int argc, char* argv[]) {
                 int64_t sent_total = 0;
                 int err = 0;
                 std::vector<char> buffer(CHUNK_SIZE);
+                bool time_error = false;
 
                 for (int64_t i = 0; i < total_chunks && !err; ) {
-
-                    if (g_interrupted.load(std::memory_order_relaxed)) {
-                        std::cout << "\n\n[error] upload interrupted by signal (Ctrl+C)\n";
-                        log("error", "Upload interrupted by signal (Ctrl+C)", CMD);
-
-                        nlohmann::json nack = {
-                            {"status", "ERROR"},
-                            {"nack", i},
-                            {"message", "Upload interrupted"},
-                            {"private_mode", true},
-                            {"local_path", local_path}
-                        };
-                        send_json(sock, nack);
-                        err = 1;
-                        break;
-                    }
-
                     int64_t offset        = i * CHUNK_SIZE;
                     int64_t bytes_to_send = std::min<int64_t>(CHUNK_SIZE, file_size - offset);
 
@@ -2093,9 +2089,9 @@ int main(int argc, char* argv[]) {
                         {"size", static_cast<int64_t>(bytes_read)}
                     };
 
+                    nlohmann::json ack = nullptr;
                     int retry = 0;
                     while (true) {
-
                         if (g_interrupted.load(std::memory_order_relaxed)) {
                             std::cout << "\n\n[error] upload interrupted by signal (Ctrl+C)\n";
                             log("error", "Upload interrupted by signal (Ctrl+C)", CMD);
@@ -2110,11 +2106,10 @@ int main(int argc, char* argv[]) {
                             err = 1;
                             break;
                         }
-
+                        
                         send_json(sock, header);
                         asio::write(sock, asio::buffer(buffer.data(), bytes_read));
 
-                        nlohmann::json ack;
                         recv_json(sock, ack);
 
                         std::string st = ack.value("status", "");
@@ -2147,6 +2142,14 @@ int main(int argc, char* argv[]) {
                                 err = 1;
                                 break;
                             }
+                        } else if (st == "ERROR" && ack.value("code", "") == "TIME_LIMIT_EXCEEDED") {
+                            std::cout << "\n\n[error] server reported time limit exceeded for chunk " << i
+                                    << " – aborting upload\n";
+                            log("error", "Server reported time limit exceeded for chunk " + std::to_string(i), CMD);                            
+                            err = 1;
+                            time_error = true;
+                            break;
+
                         } else {
                             std::cout << "\n[error] invalid ACK/NACK for chunk " << i
                                     << " from server (status=" << st
@@ -2159,6 +2162,7 @@ int main(int argc, char* argv[]) {
                         }
                     }
                 }
+                
 
                 auto end_time = std::chrono::steady_clock::now();
                 std::chrono::duration<double> elapsed = end_time - start_time;
@@ -2179,6 +2183,9 @@ int main(int argc, char* argv[]) {
                             << seconds << " s"
                             << " (" << speed_mb_s << " MB/s, " << speed_mbps << " Mbit/s)\n\n";
                     log("info", "Upload completed successfully -> " + remote_full, CMD);
+                } else if (time_error) {
+                    std::cout << "[error] Upload failed: time limit exceeded\n\n";
+                    log("error", "Upload failed: time limit exceeded", CMD);
                 } else {
                     send_json(sock, {{"cmd", "UPLOAD"}, {"status", "ERROR"}, {"message", "Upload interrupted"}});
                     std::cout << "[error] Upload interrupted";

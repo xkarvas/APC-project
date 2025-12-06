@@ -824,6 +824,9 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     {"total_chunks", total_chunks}
                 });
 
+                auto download_start = std::chrono::steady_clock::now();
+                constexpr int64_t MAX_DOWNLOAD_S = 3600;
+
                 std::vector<char> buffer(CHUNK_SIZE);
                 int64_t sent_total = 0;
                 bool download_error = false;
@@ -847,6 +850,26 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                 }
                 
                 for (int64_t i = start_chunk; i < total_chunks && !download_error;) {
+
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - download_start).count();
+
+                    if (elapsed_s > MAX_DOWNLOAD_S) {
+                        std::cout << "\n[error] download -> time limit exceeded (" 
+                                + std::to_string(elapsed_s) + " s) for " << path
+                                << " to client " << endpoint_str(sock) << "\n";
+
+                        send_json(sock, {
+                            {"cmd", "DOWNLOAD"},
+                            {"status", "ERROR"},
+                            {"message", "Download time limit (" + std::to_string(elapsed_s) + " s) exceeded"}
+                        });
+
+                        download_error = true;
+                        break;  
+                    }
+
+
                     int64_t offset        = i * CHUNK_SIZE;
                     int64_t bytes_to_send = std::min<int64_t>(CHUNK_SIZE, file_size - offset);
 
@@ -1001,6 +1024,9 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
                 send_json(sock, {{"cmd", "UPLOAD"}, {"status", "OK"}, {"message", "Ready to receive chunks"}});
 
+                auto upload_start = std::chrono::steady_clock::now();
+                constexpr int64_t MAX_UPLOAD_S = 3600;
+
                 nlohmann::json meta;
                 if (!recv_json(sock, meta)) {
                     std::cout << "[error] " << endpoint_str(sock)
@@ -1072,10 +1098,10 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         << endpoint_str(sock) << "\n";
 
                 bool upload_error = false;
+                bool time_error   = false;
 
 
                 for (int64_t i = start_chunk; i < total_chunks && !upload_error; /* i++ až po ACK */) {
-
                     nlohmann::json chunk_header;
                     if (!recv_json(sock, chunk_header)) {
                         std::cout << "\n[error] " << endpoint_str(sock)
@@ -1136,6 +1162,25 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         continue;                 
                     }
 
+                    auto now = std::chrono::steady_clock::now();
+                    auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(now - upload_start).count();
+
+                    if (elapsed_s > MAX_UPLOAD_S) {
+                        std::cout << "\n[error] upload -> time limit exceeded (" 
+                                + std::to_string(elapsed_s) + " s) for " << path
+                                << " to client " << endpoint_str(sock) << "\n";
+
+                        send_json(sock, {
+                            {"cmd", "UPLOAD"},
+                            {"status", "ERROR"},
+                            {"code", "TIME_LIMIT_EXCEEDED"},
+                            {"message", "Upload time limit (" + std::to_string(elapsed_s) + " s) exceeded"}
+                        });
+                        time_error = true;
+                        upload_error = true;
+                        break;  
+                    }
+
                     outfile.write(buffer.data(), chunk_size);
 
                     send_json(sock, {{"status", "OK"}, {"ack", i}});
@@ -1150,13 +1195,19 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     ++i;
                 }
 
-
                 outfile.close();
 
                 if (!upload_error) {
                     std::cout << "\n[ok] upload finished successfully for '"
                             << path_with_filename << "' from client "
                             << endpoint_str(sock) << "\n";
+                }
+                if (time_error) {
+                    std::cout << "[error] upload aborted for '"
+                            << path_with_filename << "' from client "
+                            << endpoint_str(sock) << "\n";
+                    std::error_code ec_rm;
+                    fs::remove(path_with_filename, ec_rm);
                 }
 
             } else if (cmd == "SYNC") {
