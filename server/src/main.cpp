@@ -1,4 +1,3 @@
-// server/main.cpp
 #define ASIO_STANDALONE
 #include <asio.hpp>
 #include <nlohmann/json.hpp>
@@ -462,7 +461,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
                         std::cout << "[auth] User " << username << " was successfully logged in!\n";
 
-                        // priprav LOGIN odpoveď
+                        // LOGIN odpoveď
                         nlohmann::json login_resp = {
                             {"cmd","LOGIN"},
                             {"status","OK"},
@@ -473,7 +472,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         };
 
                         if (has_part) {
-                            // tu pošleme zoznam všetkých „rozrobených“ operácií
+                            // resume upload/download
                             login_resp["part"] = part_entries;
                         }
 
@@ -519,8 +518,8 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
 
                     nlohmann::json userrec = {
                         {"user", username},
-                        {"password_hash", password_hash}, // klient posiela HEX alebo Base64 – ulož presne to, čo príde
-                        {"salt", salt_b64_str},           // tvoje Base64 URL-safe (bez '=')
+                        {"password_hash", password_hash}, 
+                        {"salt", salt_b64_str},          
                         {"registered_at", iso_now_utc()},
                         {"last_login_at", iso_now_utc()}
                     };
@@ -596,7 +595,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                     result = std::string("Error: ") + e.what();
                     send_json(sock, {{"cmd","LIST"},{"status","ERROR"},{"code",1},{"message","LIST command failed"},{"data", result}});
                     std::cout << "[error] " << endpoint_str(sock) << " list ->" << result << std::endl;
-                }               // TODO: implement LIST command
+                }               
             } else if (cmd == "CD") {
                 std::string path = args.value("path", "");
 
@@ -743,10 +742,11 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                         continue;
                     }
 
-                    // 🔒 ochrana proti kopírovaniu do svojho podpriečinka
+    
                     fs::path srcPath = fs::weakly_canonical(src);
                     fs::path dstPath = fs::weakly_canonical(dst);
 
+                    // nemozem kopirovat pod seba
                     if (dstPath.string().find(srcPath.string()) == 0) {
                         send_json(sock, {{"cmd","COPY"},{"status","ERROR"},{"code",3},
                                         {"message","Destination is inside source directory (would cause infinite recursion)"},{"data", ""}});
@@ -935,7 +935,7 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                                 download_error = true;
                                 break;
                             }
-                            // while(true) pokračuje – pošle znovu ten istý buffer
+                            // while(true) pokračuje – pošle znovu ten istý buffer (nerobime i++)
                         }
                         else if (st == "ERROR" && ack.value("message", "") == "Download interrupted") {
                             std::cout << "\n[error] client " << endpoint_str(sock)
@@ -1417,7 +1417,7 @@ int main(int argc, char* argv[]) {
         if (auto eq = arg.find('='); eq != std::string::npos) {
             key = arg.substr(2, eq - 2);
             val = arg.substr(eq + 1);
-            ++i; // spotrebovali sme iba jeden argv
+            ++i;
         } else {
             key = arg.substr(2);
             if (i + 1 >= argc) {
@@ -1425,7 +1425,7 @@ int main(int argc, char* argv[]) {
                 return 2;
             }
             val = argv[i + 1];
-            i += 2; // preskoč aj hodnotu
+            i += 2; // preskoc value
         }
 
         val = trimQuotes(val);
@@ -1444,7 +1444,7 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Invalid --root: empty path\n";
                 return 2;
             }
-            root = val; // string/path, nie stoi!
+            root = val; 
         } else {
             std::cerr << "Unknown option: --" << key << "\n";
             return 2;
@@ -1459,14 +1459,11 @@ int main(int argc, char* argv[]) {
         return 2;
     }
 
-    // std::signal(SIGINT,  handle_signal);   
-    // std::signal(SIGTERM, handle_signal);   
-    // std::signal(SIGQUIT, handle_signal); 
+    std::signal(SIGINT,  handle_signal);   
+    std::signal(SIGTERM, handle_signal);   
+    std::signal(SIGQUIT, handle_signal); 
 
-    // 4) Spustenie servera
     std::cout << "[server] starting...\n";
-
-
     std::cout << "[server] listening on 0.0.0.0:" << port
               << ", root: " << root.string() << "\n";
 
@@ -1477,7 +1474,7 @@ int main(int argc, char* argv[]) {
         while (!g_terminate.load(std::memory_order_relaxed)) {
             tcp::socket sock(io);
             asio::error_code ec;
-            acc.accept(sock, ec); // môže byť prerušený signálom
+            acc.accept(sock, ec);
 
             if (g_terminate.load(std::memory_order_relaxed)) {
                 break;

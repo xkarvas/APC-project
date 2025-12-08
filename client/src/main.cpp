@@ -79,7 +79,6 @@ static std::string now_timestamp()
     return oss.str();
 }
 
-// --- big-endian helpers ---
 static inline void write_u32_be(uint32_t v, unsigned char out[4]) {
     out[0] = (v >> 24) & 0xFF;
     out[1] = (v >> 16) & 0xFF;
@@ -90,7 +89,6 @@ static inline uint32_t read_u32_be(const unsigned char in[4]) {
     return (uint32_t(in[0]) << 24) | (uint32_t(in[1]) << 16) | (uint32_t(in[2]) << 8) | uint32_t(in[3]);
 }
 
-// --- blocking I/O ---
 static void send_json(tcp::socket& s, const nlohmann::json& j) {
     const std::string payload = j.dump();
     unsigned char hdr[4];
@@ -113,7 +111,7 @@ static bool recv_json(tcp::socket& s, nlohmann::json& out) {
     return true;
 }
 
-// --- pomocné: rozdelenie slov, trim, basename ---
+// pomocne rozdelenie slov, trim, basename
 static void split_words(const std::string& line, std::vector<std::string>& out) {
     std::istringstream iss(line);
     std::string tok;
@@ -142,6 +140,7 @@ std::array<unsigned char, N> b64url_to_array(const std::string& b64) {
     }
     return out;
 }
+
 // hashing with salt
 static std::string argon2id_hex(const std::string& password,
                                 const unsigned char salt[crypto_pwhash_SALTBYTES]) {
@@ -173,7 +172,6 @@ static void print_help_all() {
     using std::left;
     using std::setw;
 
-    // jednoduchá hlavička (bez farieb, aby to fungovalo všade)
     cout << "\n"
          << "╔══════════════════════════════════════════════╗\n"
          << "║              MiniDrive – HELP                ║\n"
@@ -350,7 +348,6 @@ static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size
     else { usage = ""; min_req=0; max_all=0; return false; }
 
     if (have < min_req) {
-        // vypíš, ktoré <...> chýbajú (iba stručne)
         std::cout << "\n[warning] missing required argument(s) for " << CMD << ". Usage: " << usage << "\n\n";
         return false;
     }
@@ -366,7 +363,6 @@ bool is_path_under(const std::string& path1, const std::string& path2) {
         fs::path rootPath = fs::weakly_canonical(path1);
         fs::path targetPath = fs::weakly_canonical(path2);
 
-        // over, či začiatok targetPath == rootPath
         auto rootIt = rootPath.begin();
         auto pathIt = targetPath.begin();
 
@@ -383,7 +379,9 @@ bool is_path_under(const std::string& path1, const std::string& path2) {
     }
 }
 
+
 std::string formatSize(const std::string& sizeStr) {
+    // funkccia vygenerovana z ChatGPT pre format pripony velkosti suboru
     double size = std::stod(sizeStr); // z JSONu alebo reťazca
     const char* units[] = {"B", "kB", "MB", "GB", "TB"};
     int unitIndex = 0;
@@ -414,7 +412,7 @@ std::pair<std::string,std::string> splitUserIp(const std::string& s) {
     std::string ip = m[1].str();
     std::string user = s.substr(0, m.position()); // všetko pred IP
 
-    // voliteľne: over rozsah oktetov 0..255
+    // over rozsah oktetov 0..255
     auto ok = [&]{
         int a,b,c,d;
         return std::sscanf(ip.c_str(), "%d.%d.%d.%d", &a,&b,&c,&d)==4
@@ -431,7 +429,6 @@ bool do_upload(tcp::socket& sock,
                const fs::path& local_full,
                const fs::path& remote_dir_for_file)
 {
-    // 1) prvý UPLOAD command – to isté, ako keď user napíše UPLOAD
     nlohmann::json args_up = {
         {"local",  local_full.generic_string()},
         {"remote", remote_dir_for_file.generic_string()}
@@ -570,7 +567,7 @@ std::string hash_file_local(const fs::path& path)
 struct LocalEntry {
     bool is_dir;
     std::uintmax_t size;
-    std::string hash; // len pre súbory
+    std::string hash;
 };
 
 void build_local_index(const fs::path& root_dir,
@@ -702,7 +699,7 @@ bool resume_download_from_entry(
         }
 
         if (!base.empty() && base[0] == '.') {
-            std::string new_name = base.substr(1);  // bez bodky
+            std::string new_name = base.substr(1);  
             fs::path new_path = dir / new_name;
 
             std::error_code ec;
@@ -896,8 +893,8 @@ bool resume_upload_from_entry(
             start_chunk = 0;
         }
 
-        fs::path remote_full = remote_path;               // napr. /.../.IMG_0038.MOV
-        fs::path remote_dir  = remote_full.parent_path(); // /.../1/
+        fs::path remote_full = remote_path;               
+        fs::path remote_dir  = remote_full.parent_path(); 
 
         std::cout << "\n[info] Resuming upload of '" << local_path
                   << "' to '" << remote_full.string() << "'\n";
@@ -905,12 +902,12 @@ bool resume_upload_from_entry(
                   << total_chunks << " chunks, starting at chunk "
                   << start_chunk << "\n\n";
 
-        // 1) pošleme znovu základný UPLOAD command s informáciou, že je to resumé
+        // posleme znovu UPLOAD command s resume
         nlohmann::json args;
         args["local"]             = local_path;
         args["remote"]            = remote_dir.generic_string();
         args["resume"]            = true;                      // flag pre server
-        args["remote_full"]       = remote_full.generic_string(); // plná cesta k .IMG_...
+        args["remote_full"]       = remote_full.generic_string();
         args["resume_from_chunk"] = start_chunk;
 
         nlohmann::json req_up = {
@@ -939,7 +936,6 @@ bool resume_upload_from_entry(
             return false;
         }
 
-        // 2) META s resume_from_chunk – server podľa toho vie, odkiaľ pokračovať
         nlohmann::json meta = {
             {"cmd",             "UPLOAD"},
             {"status",          "OK"},
@@ -1115,7 +1111,6 @@ int main(int argc, char* argv[]) {
             use_log = true;
             i += 2;
         } else if (arg.rfind("--log=", 0) == 0) {
-            // voliteľná podpora: --log=client.log
             log_path = arg.substr(std::string("--log=").size());
             if (log_path.empty()) {
                 std::cerr << "[error] empty log file name in --log=\n";
@@ -1325,7 +1320,7 @@ int main(int argc, char* argv[]) {
                                             std::cout
                                                     << "\n"
                                                     << "╔══════════════════════════════════════════════╗\n"
-                                                    << "║      Resuming interrupted DOWNLOADs         ║\n"
+                                                    << "║      Resuming interrupted DOWNLOAD           ║\n"
                                                     << "╚══════════════════════════════════════════════╝\n\n";
 
                                             any_resumed = true;
@@ -1346,17 +1341,7 @@ int main(int argc, char* argv[]) {
                                                 pct = 100.0 * static_cast<double>(chunk_idx)
                                                             / static_cast<double>(total_chunks);
                                             }
-
-                                            std::cout << "┌──────────────────────────────────────────────┐\n";
-                                            std::cout << "│ [" << index << "] DOWNLOAD <" << file_name << ">\n";
-                                            std::cout << "│   Server : " << server_path << "\n";
-                                            std::cout << "│   Local  : " << client_path << "\n";
-                                            std::cout << "│   Chunks : " << chunk_idx << " / " << total_chunks
-                                                    << "  ("
-                                                    << std::fixed << std::setprecision(1) << pct << "%)\n";
-                                            std::cout << "└──────────────────────────────────────────────┘\n";
-
-                                            // skutočné resumé
+                                           
                                             bool ok = resume_download_from_entry(
                                                 sock,
                                                 port,
@@ -1373,7 +1358,7 @@ int main(int argc, char* argv[]) {
                                             std::cout
                                                     << "\n"
                                                     << "╔══════════════════════════════════════════════╗\n"
-                                                    << "║         Resuming interrupted UPLOADs         ║\n"
+                                                    << "║         Resuming interrupted UPLOAD          ║\n"
                                                     << "╚══════════════════════════════════════════════╝\n\n";
                                             std::cout << "[info] Resuming UPLOAD operations is not supported yet.\n\n";
                                             bool ok = resume_upload_from_entry(sock, port, auth.value("root", "/"), entry);
@@ -1735,7 +1720,6 @@ int main(int argc, char* argv[]) {
                         log("info", "Directory listing received", CMD);
 
                         try {
-                            // 🔹 Skús parse-nuť obsah "data" (je to string, ale vo formáte JSON)
                             nlohmann::json files = nlohmann::json::parse(msg);
 
                             if (files.is_array()) {
@@ -1763,7 +1747,7 @@ int main(int argc, char* argv[]) {
                                 log("error", msg, CMD);
                             }
                         } catch (const std::exception& e) {
-                            // 🔹 Ak to nie je validný JSON, vypíš ako obyčajný text
+                            // ak to nie je validný JSON, vypíš ako obyčajný text
                             std::cout << msg << "\n";
                             log("error", msg, CMD);
                         }
@@ -1869,7 +1853,7 @@ int main(int argc, char* argv[]) {
 
                     for (int64_t i = 0; i < total_chunks; ++i) {
 
-                        // užívateľ stlačil Ctrl+C
+                        // klient stlačil Ctrl+C
                         if (g_interrupted.load(std::memory_order_relaxed)) {
                             std::cout << "\n\n[error] download interrupted by user (Ctrl+C)";
                             log("error", "Download interrupted by user (Ctrl+C)", CMD);
@@ -2266,27 +2250,19 @@ int main(int argc, char* argv[]) {
                     auto it = remote_index.find(rel);
 
                     if (l.is_dir) {
-                        // LOKÁLNE: priečinok
                         if (it == remote_index.end()) {
-                            // na serveri neexistuje -> vytvoríme priečinok
                             ops.push_back({Op::MKDIR, rel});
                         } else if (!it->second.is_dir) {
-                            // na serveri je na tej istej ceste súbor -> zmaž súbor, potom vytvor priečinok
                             ops.push_back({Op::DELETE_FILE, rel});
                             ops.push_back({Op::MKDIR, rel});
                         }
-                        // ak je na serveri tiež priečinok -> nič netreba
                     } else {
-                        // LOKÁLNE: súbor
                         if (it == remote_index.end()) {
-                            // súbor na serveri neexistuje -> stačí upload
                             ops.push_back({Op::UPLOAD_FILE, rel});
                         } else if (it->second.is_dir) {
-                            // na serveri je priečinok, lokálne súbor -> zmažeme priečinok, potom uploadneme súbor
                             ops.push_back({Op::DELETE_DIR, rel});
                             ops.push_back({Op::UPLOAD_FILE, rel});
                         } else if (it->second.hash != l.hash) {
-                            // súbor existuje na oboch stranách, ale hash je iný -> zmaz a znova uploadni
                             ops.push_back({Op::DELETE_FILE, rel});
                             ops.push_back({Op::UPLOAD_FILE, rel});
 
@@ -2331,7 +2307,7 @@ int main(int argc, char* argv[]) {
                     recv_json(sock, r);
                 }
 
-                // DELETE priečinky (RMDIR) 
+                // RMDIR 
                 std::vector<std::string> dirs_to_delete;
                 for (const auto& op : ops) {
                     if (op.type == Op::DELETE_DIR) {
@@ -2340,7 +2316,7 @@ int main(int argc, char* argv[]) {
                 }
                 std::sort(dirs_to_delete.begin(), dirs_to_delete.end(),
                         [](const std::string& a, const std::string& b){
-                            return a.size() > b.size(); // dlhšia (hlbšia) najprv
+                            return a.size() > b.size(); // deeper first
                         });
 
                 for (const auto& rel : dirs_to_delete) {
@@ -2374,7 +2350,7 @@ int main(int argc, char* argv[]) {
                 }
 
 
-                // UPLOAD súbory 
+                // UPLOAD  
                 for (const auto& op : ops) {
                     if (op.type != Op::UPLOAD_FILE) continue;
 
@@ -2438,6 +2414,7 @@ int main(int argc, char* argv[]) {
 
                 int skipped_count = static_cast<int>(skipped_files.size());
 
+                // sync summary vypis
                 std::cout << "\n========================================\n";
                 std::cout << " SYNC summary\n";
                 std::cout << "  Local : " << local_path << "\n";
