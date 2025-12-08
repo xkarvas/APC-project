@@ -188,18 +188,18 @@ static void print_help_all() {
     };
 
     Row rows[] = {
-        {"LIST",     "[path]",                      "List directory contents (default: current remote dir)"},
-        {"UPLOAD",   "<local_path> <remote_dir>",   "Upload local file into remote directory"},
-        {"DOWNLOAD", "<remote_path> <local_dir>",   "Download remote file into local directory"},
-        {"DELETE",   "<path>",                      "Delete a remote file"},
-        {"CD",       "<path>",                      "Change remote working directory"},
-        {"MKDIR",    "<path>",                      "Create a remote directory (recursively)"},
-        {"RMDIR",    "<path>",                      "Remove a remote directory (recursively)"},
-        {"MOVE",     "<src> <dst>",                 "Move / rename file or directory on server"},
-        {"COPY",     "<src> <dst>",                 "Copy file or directory on server"},
-        {"SYNC",     "<local> <remote>",            "One-way sync: make remote directory match local"},
-        {"HELP",     "[command]",                   "Show this help or detailed help for a command"},
-        {"EXIT",     "",                            "Exit client (also: QUIT, Q, E)"}
+        {"LIST",     "[path]",                        "List directory contents (default: current remote dir)"},
+        {"UPLOAD",   "<local_path> <remote_dir>",     "Upload local file into remote directory"},
+        {"DOWNLOAD", "<remote_path> <local_dir>",     "Download remote file into local directory"},
+        {"DELETE",   "<path>",                        "Delete a remote file"},
+        {"CD",       "<path>",                        "Change remote working directory"},
+        {"MKDIR",    "<path>",                        "Create a remote directory (recursively)"},
+        {"RMDIR",    "<path>",                        "Remove a remote directory (recursively)"},
+        {"MOVE",     "<src> <dst>",                   "Move / rename file or directory on server"},
+        {"COPY",     "<src> <dst>",                   "Copy file or directory on server"},
+        {"SYNC",     "<local> <remote>",              "One-way sync: make remote directory match local"},
+        {"HELP",     "[command]",                     "Show this help or detailed help for a command"},
+        {"EXIT",     "",                              "Exit client (also: QUIT, Q, E)"}
     };
 
     const int w_cmd  = 10;
@@ -207,14 +207,14 @@ static void print_help_all() {
 
     cout << "  " << left << setw(w_cmd)  << "CMD"
          << " " << left << setw(w_args) << "ARGS"
-         << "DESCRIPTION\n";
+         << "  DESCRIPTION\n";
 
     cout << "  " << std::string(w_cmd + w_args + 35, '-') << "\n";
 
     for (const auto& r : rows) {
         cout << "  " << left << setw(w_cmd)  << r.cmd
              << " " << left << setw(w_args) << r.args
-             << r.desc << "\n";
+             << "  " << r.desc << "\n";
     }
 
     cout << "\n"
@@ -238,12 +238,13 @@ static void print_help_cmd(const std::string& CMD) {
     }
     else if (CMD == "UPLOAD") {
         cout <<
-            "\nUPLOAD <local_path> <remote_dir>\n"
+            "\nUPLOAD <local_path> [remote_dir]\n"
             "  Upload a local file into a remote directory.\n"
             "  - <local_path>  : path to an existing local file.\n"
-            "  - <remote_dir>  : existing directory on the server.\n"
+            "  - If [remote_dir] is omitted, the current remote directory is used.\n"
             "  The file keeps its original filename on the server.\n"
-            "  - Example: UPLOAD report.pdf /docs\n\n";
+            "  - Example: UPLOAD /desktop/report.pdf\n"
+            "             UPLOAD /desktop/report.pdf /docs\n\n";
     }
     else if (CMD == "DOWNLOAD") {
         cout <<
@@ -335,8 +336,8 @@ static void print_help_cmd(const std::string& CMD) {
 static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size_t& max_all, std::string& usage) {
     // usage text
     if (CMD == "LIST")       { usage = "LIST [path]";                         min_req=0; max_all=1; }
-    else if (CMD == "UPLOAD"){ usage = "UPLOAD <local_path> <remote_path>";   min_req=2; max_all=2; }
-    else if (CMD == "DOWNLOAD"){ usage= "DOWNLOAD <remote_path> <local_path>";min_req=2; max_all=2; }
+    else if (CMD == "UPLOAD"){ usage = "UPLOAD <local_path> [remote_dir]";   min_req=1; max_all=2; }
+    else if (CMD == "DOWNLOAD"){ usage= "DOWNLOAD <remote_path> <local_dir>";min_req=2; max_all=2; }
     else if (CMD == "DELETE"){ usage = "DELETE <path>";                        min_req=1; max_all=1; }
     else if (CMD == "CD")    { usage = "CD <path>";                            min_req=1; max_all=1; }
     else if (CMD == "MKDIR") { usage = "MKDIR <path>";                         min_req=1; max_all=1; }
@@ -1667,7 +1668,13 @@ int main(int argc, char* argv[]) {
 
 
             } else if (CMD == "UPLOAD") {
-                args["local"] = toks[1]; args["remote"] = toks[2];
+                args["local"] = toks[1]; 
+
+                if (toks.size() >= 3) {
+                    args["remote"] = toks[2];
+                } else {
+                    args["remote"] = dir;   // root
+                }
 
                 if (!(args["remote"].get<std::string>().starts_with("/"))) {
                     args["remote"] = dir + "/" + args["remote"].get<std::string>();

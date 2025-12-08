@@ -104,11 +104,11 @@ std::string prepare_user_root(const std::string& root, const std::string& user) 
     // vytvor root (ak ešte neexistuje)
     fs::create_directories(base_root, ec);
 
-    // vytvor ./root/users
+    // vytvor ./root/.users
     ec.clear();
     fs::create_directories(users_dir, ec);
 
-    // vytvor ./root/users/<user>
+    // vytvor ./root/.users/<user>
     ec.clear();
     fs::create_directories(user_dir, ec);
 
@@ -116,7 +116,6 @@ std::string prepare_user_root(const std::string& root, const std::string& user) 
     std::error_code ec2;
     fs::path canon = fs::weakly_canonical(user_dir, ec2);
     if (ec2) {
-        // ak zlyhá canonicalizácia, vráť aspoň "raw" cestu
         return user_dir.string();
     }
     return canon.string();
@@ -149,7 +148,7 @@ static inline uint32_t read_u32_be(const unsigned char in[4]) {
 static std::string trimQuotes(std::string s) {
     auto q = [](char c){ return c=='\'' || c=='"'; };
     if (!s.empty() && q(s.front())) s.erase(s.begin());
-    if (!s.empty() && q(s.back()))  s.pop_back(); // zvládne aj ./data'
+    if (!s.empty() && q(s.back()))  s.pop_back(); 
     return s;
 }
 
@@ -194,12 +193,11 @@ bool is_path_under_root(const std::string& root, const std::string& path) {
                    std::distance(fullPath.begin(), fullPath.end());
         };
 
-        // 1) základná podmienka: path musí byť pod rootom (alebo rovná rootu)
+        // 1 path musí byť pod rootom (alebo rovná rootu)
         if (!isPrefix(rootPath, targetPath)) {
             return false;
         }
-
-        // 2) zisti, či root už je niekde v .users (private mód)
+        // 2 zisti, či root už je niekde v .users (private mód)
         bool rootInsideUsers = false;
         for (auto it = rootPath.begin(); it != rootPath.end(); ++it) {
             if (it->filename() == ".users") {
@@ -207,17 +205,13 @@ bool is_path_under_root(const std::string& root, const std::string& path) {
                 break;
             }
         }
-
-        // 3) ak root NIE JE v .users (public mód), zakáž prístup do root/.users/**
+        // 3 ak root nie je v .users (public mód), zakáž prístup do root/.users
         if (!rootInsideUsers) {
             fs::path usersRoot = rootPath / ".users";
             if (isPrefix(usersRoot, targetPath)) {
-                // pokus ísť do .users alebo niečoho pod ním -> zakáž
                 return false;
             }
         }
-
-        // všetko OK
         return true;
     }
     catch (...) {
@@ -235,9 +229,7 @@ static uintmax_t directory_size(const fs::path& dir) {
                 }
             }
         }
-    } catch (...) {
-        // ak zlyhá prístup k niektorému súboru, len preskočíme
-    }
+    } catch (...) {}
     return total;
 }
 
@@ -321,7 +313,7 @@ void write_part_info(const std::string& root,
                      const std::string& remote_path)
 {
     try {
-        fs::path part_path = fs::path(root) / ".part";   // napr. /user/root/.part
+        fs::path part_path = fs::path(root) / ".part";   // napr. /user/file.part
 
         nlohmann::json j = {
             {"cmd",          cmd},
@@ -331,7 +323,7 @@ void write_part_info(const std::string& root,
             {"remote",       remote_path}
         };
 
-        std::ofstream f(part_path, std::ios::app);  // append
+        std::ofstream f(part_path, std::ios::app);
         if (!f.is_open()) {
             std::cerr << "[error] cannot open part file: "
                       << part_path << "\n";
@@ -340,7 +332,7 @@ void write_part_info(const std::string& root,
 
         f << j.dump() << "\n";
     } catch (const std::exception& e) {
-        std::cerr << "[error] write_part_info failed: " << e.what() << "\n";
+        std::cerr << "[error] " << e.what() << "\n";
     }
 }
 
@@ -1006,6 +998,10 @@ static void handle_client(tcp::socket sock, const fs::path& root) {
                             << ", root: " << root
                             << " local_path: " << args.value("local", "") << "\n";
                     continue;
+                }
+
+                if (req.value("message","") == "Upload interrupted") {
+                    continue;;
                 }
 
                 if (!fs::is_directory(path)) {
