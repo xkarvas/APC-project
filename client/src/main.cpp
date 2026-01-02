@@ -188,7 +188,7 @@ static void print_help_all() {
     Row rows[] = {
         {"LIST",     "[path]",                        "List directory contents (default: current remote dir)"},
         {"UPLOAD",   "<local_path> <remote_dir>",     "Upload local file into remote directory"},
-        {"DOWNLOAD", "<remote_path> <local_dir>",     "Download remote file into local directory"},
+        {"DOWNLOAD", "<remote_path> [local_dir]",     "Download remote file into local directory"},
         {"DELETE",   "<path>",                        "Delete a remote file"},
         {"CD",       "<path>",                        "Change remote working directory"},
         {"MKDIR",    "<path>",                        "Create a remote directory (recursively)"},
@@ -248,10 +248,14 @@ static void print_help_cmd(const std::string& CMD) {
         cout <<
             "\nDOWNLOAD <remote_path> <local_dir>\n"
             "  Download a remote file into a local directory.\n"
-            "  - <remote_path> : full path to a file on the server.\n"
-            "  - <local_dir>   : existing local directory; the filename\n"
-            "                    is taken from <remote_path>.\n"
-            "  - Example: DOWNLOAD /docs/report.pdf /downloads\n\n";
+            "  - <remote_path> : path to a file on the server.\n"
+            "  - [local_path]  : optional local FILE path where the download will be saved\n"
+            "                   (the file usually does not exist yet; it will be created).\n"
+            "  - If [local_path] is omitted, the file is saved into the current local directory\n"
+            "    using the server filename: ./<basename(remote_path)>.\n"
+            "  - Example: DOWNLOAD /docs/report.pdf\n"
+            "             DOWNLOAD /docs/report.pdf ./downloads/report.pdf\n\n";
+}
     }
     else if (CMD == "DELETE") {
         cout <<
@@ -335,7 +339,7 @@ static bool need_args(const std::string& CMD, size_t have, size_t& min_req, size
     // usage text
     if (CMD == "LIST")       { usage = "LIST [path]";                         min_req=0; max_all=1; }
     else if (CMD == "UPLOAD"){ usage = "UPLOAD <local_path> [remote_dir]";   min_req=1; max_all=2; }
-    else if (CMD == "DOWNLOAD"){ usage= "DOWNLOAD <remote_path> <local_dir>";min_req=2; max_all=2; }
+    else if (CMD == "DOWNLOAD"){ usage= "DOWNLOAD <remote_path> [local_dir]";min_req=1; max_all=2; }
     else if (CMD == "DELETE"){ usage = "DELETE <path>";                        min_req=1; max_all=1; }
     else if (CMD == "CD")    { usage = "CD <path>";                            min_req=1; max_all=1; }
     else if (CMD == "MKDIR") { usage = "MKDIR <path>";                         min_req=1; max_all=1; }
@@ -1621,7 +1625,13 @@ int main(int argc, char* argv[]) {
                     continue; 
                 }
             } else if (CMD == "DOWNLOAD") {
-                args["remote"] = toks[1]; args["local"] = toks[2];
+                args["remote"] = toks[1]; 
+
+                if (toks.size() >= 3) {
+                    args["local"] = toks[2];
+                } else {
+                    args["local"] = ".";
+                }
 
                 if (!(args["remote"].get<std::string>().starts_with("/"))) {
                     args["remote"] = dir + "/" + args["remote"].get<std::string>();
