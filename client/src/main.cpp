@@ -255,7 +255,7 @@ static void print_help_cmd(const std::string& CMD) {
             "    using the server filename: ./<basename(remote_path)>.\n"
             "  - Example: DOWNLOAD /docs/report.pdf\n"
             "             DOWNLOAD /docs/report.pdf ./downloads/report.pdf\n\n";
-}
+
     }
     else if (CMD == "DELETE") {
         cout <<
@@ -1091,6 +1091,48 @@ void handle_signal(int)
 }
 
 
+static bool resolve_download_target(
+    const fs::path& remote_path,
+    const std::string& local_arg,
+    fs::path& out_dir,
+    std::string& out_name,
+    std::string& err)
+{
+    fs::path local_input = local_arg.empty() ? fs::path(".") : fs::path(local_arg);
+
+    std::string remote_base = remote_path.filename().string();
+    if (remote_base.empty()) {
+        err = "Remote path has no filename.";
+        return false;
+    }
+
+    std::error_code ec;
+    bool ends_with_sep = !local_arg.empty() && (local_arg.back() == '/' || local_arg.back() == '\\');
+    bool exists_dir = fs::exists(local_input, ec) && fs::is_directory(local_input, ec);
+
+    std::string last = local_input.filename().string();
+    bool looks_like_file = local_input.has_extension() || (last.find('.') != std::string::npos);
+
+    if (exists_dir || ends_with_sep) {
+        out_dir  = local_input;
+        out_name = remote_base;
+        return true;
+    }
+
+    if (looks_like_file) {
+        out_dir = local_input.parent_path();
+        if (out_dir.empty()) out_dir = ".";
+        out_name = local_input.filename().string();
+        if (out_name.empty()) out_name = remote_base;
+        return true;
+    }
+
+    // default: ber to ako adresár (aj keď neexistuje)
+    out_dir  = local_input;
+    out_name = remote_base;
+    return true;
+}
+
 int main(int argc, char* argv[]) {
     if (argc < 2) {
         std::cerr
@@ -1637,30 +1679,36 @@ int main(int argc, char* argv[]) {
                     args["remote"] = dir + "/" + args["remote"].get<std::string>();
                 } 
 
-                std::string local_path = args["local"].get<std::string>();
-                if (!fs::exists(local_path) || !fs::is_directory(local_path)) {
-                    std::cout << "\n[warning] Local path '" << local_path 
-                            << "' must be an existing directory!\n\n";
-                    log("warning", "Local path '" + local_path + "' must be an existing directory!", CMD);
-                    continue; 
+
+                fs::path local_dir;
+                std::string filename;
+                std::string err;
+
+                if (!resolve_download_target(fs::path(args["remote"].get<std::string>()),
+                                            (toks.size() >= 3 ? toks[2] : ""),
+                                            local_dir, filename, err)) {
+                    std::cout << "\n[warning] " << err << "\n\n";
+                    continue;
                 }
 
-                
+                // vytvor adresáre rekurzívne
+                std::error_code ec;
+                if (!fs::exists(local_dir, ec)) {
+                    if (!fs::create_directories(local_dir, ec) || ec) {
+                        std::cout << "\n[error] Cannot create local directory '" << local_dir.string() << "': " << ec.message() << "\n\n";
+                        continue;
+                    }
+                }
 
-                std::string filename = fs::path(args["remote"].get<std::string>()).filename().string();
+                args["local"] = local_dir.string();
                 args["filename"] = filename;
 
-
-                if (fs::exists(local_path + "/" + filename)) {
-                    std::cout << "\n[warning] File '" << local_path + "/" + filename 
+                if (fs::exists(local_dir.string() + "/" + filename)) {
+                    std::cout << "\n[error] File '" << local_dir.string() + "/" + filename 
                             << "' already exists locally! Download aborted to prevent overwrite.\n\n";
-                    log("warning", "File '" + local_path + "/" + filename + "' already exists locally! Download aborted to prevent overwrite.", CMD);
+                    log("error", "File '" + local_dir.string() + "/" + filename + "' already exists locally! Download aborted to prevent overwrite.", CMD);
                     continue; 
                 }
-                /* std::cout << "\n[info] Will download '" << args["remote"] 
-                        << "' to directory '" << local_path 
-                        << "' as '" << filename << "'\n\n"; */
-
 
             } else if (CMD == "UPLOAD") {
                 args["local"] = toks[1]; 
